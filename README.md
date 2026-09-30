@@ -31,22 +31,57 @@ For detailed system design, data flow, and components, see **[ARCHITECTURE.md](A
 
 ---
 
-## 🚀 Installation & Quick Start
+## 🚀 Installation & Getting Started
 
-### Download the Pre-Built App
-Download the latest **`MacBackup.dmg`** installer directly from the [Releases](https://github.com/rituparnaprof/macbackup/releases) page. Open the disk image and drag **MacBackup.app** to your `/Applications` folder.
+### Option 1: Download Pre-Built DMG
 
-### Or Build from Source
-```bash
-git clone https://github.com/rituparnaprof/macbackup.git
-cd macbackup
+1. Download **`MacBackup.dmg`** from the [Releases](https://github.com/rituparnaprof/macbackup/releases) page.
+2. Open the disk image and drag **`MacBackup.app`** to your `/Applications` folder.
+3. **Bypassing macOS Gatekeeper (`xattr`)**:
+   > [!NOTE]
+   > Because this is a free, independent open-source project without a paid Apple Developer subscription, the binary is not notarized by Apple. macOS Gatekeeper will flag downloaded binaries with *"cannot be opened because the developer cannot be verified"* or *"is damaged"*.
+   >
+   > To clear the macOS quarantine attribute, open **Terminal** and run:
+   > ```bash
+   > xattr -cr /Applications/MacBackup.app
+   > ```
+   > *(Alternatively: Right-click / Control-click `MacBackup.app` in Finder, select **Open**, and click **Open** in the confirmation dialog).*
 
-# Build optimized Apple Silicon binary
-swift build -c release --triple arm64-apple-macosx
+---
 
-# Run directly
-swift run MacBackup
-```
+### Option 2: Build & Run Locally from Source (No Developer Certificate Needed)
+
+Building the application on your own Mac automatically ad-hoc signs the binary locally, so macOS will run it without quarantine warnings:
+
+1. **Install Prerequisites**: Ensure the Swift toolchain is installed (via Xcode or Command Line Tools):
+   ```bash
+   xcode-select --install
+   ```
+
+2. **Clone the Repository**:
+   ```bash
+   git clone https://github.com/rituparnaprof/macbackup.git
+   cd macbackup
+   ```
+
+3. **Run Directly via Swift PM**:
+   ```bash
+   swift run MacBackup
+   ```
+
+4. **Or Build a Standalone `.app` for `/Applications`**:
+   ```bash
+   # Compile optimized release binary for Apple Silicon
+   swift build -c release --triple arm64-apple-macosx
+
+   # Assemble local .app bundle
+   mkdir -p MacBackup.app/Contents/MacOS MacBackup.app/Contents/Resources
+   cp "$(swift build --show-bin-path -c release --triple arm64-apple-macosx)/MacBackup" MacBackup.app/Contents/MacOS/
+   cp assets/MacBackup.icns MacBackup.app/Contents/Resources/AppIcon.icns
+
+   # Copy to your Applications folder
+   cp -R MacBackup.app /Applications/
+   ```
 
 ---
 
