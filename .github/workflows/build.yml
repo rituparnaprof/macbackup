@@ -1,15 +1,17 @@
-name: Build & Package MacBackup
+name: Build & Release MacBackup
 
 on:
   push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -134,3 +136,12 @@ jobs:
           path: MacBackup.dmg
           if-no-files-found: error
           retention-days: 14
+
+      - name: Create GitHub Release & Attach DMG
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: MacBackup.dmg
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

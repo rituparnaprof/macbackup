@@ -129,13 +129,14 @@ flowchart TD
 
 ---
 
-## 🤖 Continuous Integration
+## 🤖 Continuous Integration & Releases
 
 MacBackup includes a GitHub Actions workflow (`.github/workflows/build.yml`) that runs on `macos-latest`:
 
+- **Tag-Driven**: Triggers only when a release tag is pushed (e.g., `git tag v1.0.0 && git push origin v1.0.0`).
 - Validates Swift build in Release mode.
-- Compiles the application bundle and packages it into `MacBackup.dmg`.
-- Uploads the resulting `MacBackup.dmg` installer directly as a build artifact for every push and pull request.
+- Compiles the macOS application bundle and packages it into `MacBackup.dmg`.
+- Automatically publishes a GitHub Release and attaches `MacBackup.dmg` as a release asset, alongside workflow artifact uploads.
 
 ---
 
