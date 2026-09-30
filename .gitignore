@@ -3,25 +3,30 @@
 .AppleDouble
 .LSOverride
 Icon
+._*
 
 # Swift Package Manager & Xcode
 /.build/
-/Packages
-userdata/
+/Packages/
+xcuserdata/
 DerivedData/
-.swiftpm/configuration/registries.json
-.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
-.netrc
+.swiftpm/
+*.xcuserstate
+*.xcworkspace
+!Package.swift
 
 # Build artifacts & packages
 *.dmg
 *.app
 *.iconset
 dmg_temp/
-test_eject
+test_eject*
 
 # Editor and temporary files
 *.swp
 *~
 .idea/
 .vscode/
+*.bak
+*.tmp
+*.log
