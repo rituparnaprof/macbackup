@@ -1,29 +1,29 @@
-# MacBackup 💾
+# MacBackup
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-macOS%2013%2B-lightgrey.svg)](https://www.apple.com/macos/)
 [![Architecture](https://img.shields.io/badge/Arch-Apple%20Silicon%20(arm64)-orange.svg)](https://www.apple.com/mac/)
 [![Build & Release](https://github.com/rituparnaprof/macbackup/actions/workflows/build.yml/badge.svg)](https://github.com/rituparnaprof/macbackup/actions/workflows/build.yml)
 
-**MacBackup** is a sleek, lightweight macOS menu bar utility built in SwiftUI for fast, fail-safe backups from your Mac SSD to external storage (USB drives or external SSDs), built exclusively for Apple Silicon.
+**MacBackup** is a lightweight macOS menu bar utility built in SwiftUI for fast, reliable backups from your Mac SSD to external storage (USB drives or external SSDs), built specifically for Apple Silicon.
 
 ---
 
-## ✨ Features
+## What it does
 
-- 🔌 **Auto-Drive Recognition**: Recognizes your registered backup volume by unique Volume UUID and prompts you to sync immediately upon connection.
-- 🛡️ **Incremental & Versioned Sync**: Copies only new or modified files. Automatically archives prior versions with timestamps (`filename_YYYYMMDD_HHmmss.ext`) before updating.
-- 🔒 **SHA-256 Checksum Verification**: Double-checks cryptographic hashes through an atomic staging pipeline (`.tmp` → verify → atomic move) to prevent data corruption.
-- ☕ **Sleep Prevention & Retries**: Prevents system sleep during active backups and automatically retries transient I/O errors up to 3 times.
-- 🌳 **Orphan Detection**: Scans the backup drive for files that no longer exist on your Mac SSD, tagging them as `(Orphaned)` for review.
-- ⏏️ **Safe Ejection**: Unmounts and ejects the target storage drive directly from the UI.
-- 🎛️ **Dual-Mode UI**: Operates quietly in the menu bar with status indicators and seamlessly expands to a full window on demand.
+- **Detects your drive automatically**: Plug in your registered external drive, and the app recognizes it and prompts you to sync right away without having to search for folders.
+- **Backs up only what changed**: Only new and modified files are copied over. If an existing backup file has changed on your Mac, the older version is saved with a timestamp instead of being overwritten.
+- **Verifies data integrity**: Every file is staged to a temporary file and verified against the source using SHA-256 checksums before being moved to its final location.
+- **Keeps your Mac awake**: Prevents macOS from sleeping during active transfers, and automatically retries any transient read or write errors up to three times.
+- **Finds deleted files**: Scans the backup drive for files that you have since removed from your Mac SSD, highlighting them as orphaned so you can review or delete them.
+- **One-click drive eject**: Safely unmounts and ejects your external drive straight from the application window.
+- **Runs quietly in the menu bar**: Sits in your menu bar with quick status indicators and opens into a full window whenever you want to inspect files or tweak settings.
 
-For detailed system design, data flow, and components, see **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+For technical details, component breakdown, and system design, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
-## 📋 Requirements
+## Requirements
 
 - **Operating System**: macOS 13.0 (Ventura) or later
 - **Architecture**: Apple Silicon (`arm64` - M1/M2/M3/M4 or later) exclusively
@@ -31,7 +31,7 @@ For detailed system design, data flow, and components, see **[ARCHITECTURE.md](A
 
 ---
 
-## 🚀 Installation & Getting Started
+## Installation & Getting Started
 
 ### Option 1: Download Pre-Built DMG
 
@@ -85,7 +85,7 @@ Building the application on your own Mac automatically ad-hoc signs the binary l
 
 ---
 
-## ⚠️ Important Warnings & Disclaimers
+## Important Warnings & Disclaimers
 
 ### 1. Data Deletion Warning (`deleteNode`)
 > [!CAUTION]
@@ -103,6 +103,6 @@ Building the application on your own Mac automatically ad-hoc signs the binary l
 
 ---
 
-## 📄 License
+## License
 
 This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**. See the [LICENSE](LICENSE) file for the full license text.
