@@ -48,7 +48,7 @@
 ## 📋 Requirements
 
 - **Operating System**: macOS 13.0 (Ventura) or later
-- **Architecture**: Apple Silicon (M1/M2/M3/M4) and Intel (x86_64)
+- **Architecture**: Apple Silicon (`arm64` - M1/M2/M3/M4 or later) exclusively
 - **Toolchain**: Swift 5.9+ / Xcode 15+ (for compiling from source)
 
 ---
@@ -63,8 +63,8 @@ Clone the repository and run:
 git clone https://github.com/rituparnaprof/macbackup.git
 cd macbackup
 
-# Build in debug mode
-swift build
+# Build in debug mode (Apple Silicon)
+swift build --triple arm64-apple-macosx
 
 # Run directly
 swift run MacBackup
@@ -72,10 +72,10 @@ swift run MacBackup
 
 ### 2. Download or Build the DMG Installer
 
-- **Automated CI/CD Builds**: Every push and pull request automatically triggers GitHub Actions to compile the app and assemble `MacBackup.dmg`. You can download the latest ready-to-use installer `.dmg` directly from the **Actions** tab artifacts in the GitHub repository.
-- **Local Release Build**: To build the optimized release binary on your Mac:
+- **Automated CI/CD Releases**: Pushing a release tag (e.g. `v1.0.0`) triggers GitHub Actions to build an optimized Apple Silicon binary, package `MacBackup.dmg`, and publish a GitHub Release with the installer attached.
+- **Local Release Build**: To build the optimized release binary for Apple Silicon on your Mac:
   ```bash
-  swift build -c release
+  swift build -c release --triple arm64-apple-macosx
   ```
 
 ---

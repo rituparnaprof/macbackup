@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   build:
-    name: Build macOS Application & DMG
+    name: Build macOS Application & DMG (Apple Silicon)
     runs-on: macos-latest
 
     steps:
@@ -25,18 +25,19 @@ jobs:
       - name: Show developer environment
         run: |
           sw_vers
+          uname -m
           xcodebuild -version
           swift --version
 
-      - name: Build Swift Package (Release)
+      - name: Build Swift Package (Release - Apple Silicon)
         run: |
-          swift build -c release
+          swift build -c release --triple arm64-apple-macosx
 
-      - name: Build Application Bundle & DMG Installer
+      - name: Build Application Bundle & DMG Installer (Apple Silicon)
         run: |
           set -e
           APP_NAME="MacBackup"
-          BUILD_DIR=".build/release"
+          BUILD_DIR="$(swift build --show-bin-path -c release --triple arm64-apple-macosx 2>/dev/null || echo ".build/release")"
           APP_BUNDLE="$APP_NAME.app"
           DMG_NAME="$APP_NAME.dmg"
           ICON_PNG="assets/AppIcon.png"
@@ -66,8 +67,12 @@ jobs:
           mkdir -p "$APP_BUNDLE/Contents/MacOS"
           mkdir -p "$APP_BUNDLE/Contents/Resources"
 
-          echo "🚀 Copying release binary..."
+          echo "🚀 Copying Apple Silicon release binary from $BUILD_DIR..."
           cp "$BUILD_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"
+
+          # Verify binary architecture is arm64
+          echo "🔍 Verifying binary architecture..."
+          file "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
           if [ -f "$ICON_ICNS" ]; then
             echo "🖼️  Copying icon..."
@@ -98,6 +103,10 @@ jobs:
               <true/>
               <key>NSHighResolutionCapable</key>
               <true/>
+              <key>LSArchitecturePriority</key>
+              <array>
+                  <string>arm64</string>
+              </array>
               <key>CFBundleURLTypes</key>
               <array>
                   <dict>
@@ -127,7 +136,7 @@ jobs:
           # 4. Clean up temporary files
           rm -rf "$APP_BUNDLE"
           rm -rf "$DMG_TEMP"
-          echo "✅ DMG build complete: $DMG_NAME"
+          echo "✅ Apple Silicon DMG build complete: $DMG_NAME"
 
       - name: Upload DMG Artifact
         uses: actions/upload-artifact@v4
