@@ -34,7 +34,7 @@ let package = Package(
         // Targets can depend on other targets in this package and products from dependencies.
         .executableTarget(
             name: "MacBackup",
-            path: "src/MacBackup"
+            path: "src"
         ),
     ]
 )
