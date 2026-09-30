@@ -37,8 +37,8 @@ jobs:
           BUILD_DIR=".build/release"
           APP_BUNDLE="$APP_NAME.app"
           DMG_NAME="$APP_NAME.dmg"
-          ICON_PNG="AppIcon.png"
-          ICON_ICNS="MacBackup.icns"
+          ICON_PNG="assets/AppIcon.png"
+          ICON_ICNS="assets/MacBackup.icns"
 
           # 1. Generate App Icon if needed
           if [ -f "$ICON_PNG" ] && [ ! -f "$ICON_ICNS" ]; then
@@ -54,7 +54,7 @@ jobs:
             sips -s format png -z 512 512   "$ICON_PNG" --out "$APP_NAME.iconset/icon_256x256@2x.png"
             sips -s format png -z 512 512   "$ICON_PNG" --out "$APP_NAME.iconset/icon_512x512.png"
             sips -s format png -z 1024 1024 "$ICON_PNG" --out "$APP_NAME.iconset/icon_512x512@2x.png"
-            iconutil -c icns "$APP_NAME.iconset"
+            iconutil -c icns "$APP_NAME.iconset" -o "$ICON_ICNS"
             rm -rf "$APP_NAME.iconset"
           fi
 
