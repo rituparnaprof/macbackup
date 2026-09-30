@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+      - '[0-9]+.*'
   workflow_dispatch:
 
 concurrency:
@@ -150,6 +151,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          name: MacBackup ${{ github.ref_name }} (Apple Silicon)
           files: MacBackup.dmg
           generate_release_notes: true
         env:
