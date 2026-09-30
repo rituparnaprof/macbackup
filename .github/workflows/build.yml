@@ -32,8 +32,100 @@ jobs:
 
       - name: Build Application Bundle & DMG Installer
         run: |
-          chmod +x build_dmg.sh
-          ./build_dmg.sh
+          set -e
+          APP_NAME="MacBackup"
+          BUILD_DIR=".build/release"
+          APP_BUNDLE="$APP_NAME.app"
+          DMG_NAME="$APP_NAME.dmg"
+          ICON_PNG="AppIcon.png"
+          ICON_ICNS="MacBackup.icns"
+
+          # 1. Generate App Icon if needed
+          if [ -f "$ICON_PNG" ] && [ ! -f "$ICON_ICNS" ]; then
+            echo "🎨 Generating App Icon from $ICON_PNG..."
+            mkdir -p "$APP_NAME.iconset"
+            sips -s format png -z 16 16     "$ICON_PNG" --out "$APP_NAME.iconset/icon_16x16.png"
+            sips -s format png -z 32 32     "$ICON_PNG" --out "$APP_NAME.iconset/icon_16x16@2x.png"
+            sips -s format png -z 32 32     "$ICON_PNG" --out "$APP_NAME.iconset/icon_32x32.png"
+            sips -s format png -z 64 64     "$ICON_PNG" --out "$APP_NAME.iconset/icon_32x32@2x.png"
+            sips -s format png -z 128 128   "$ICON_PNG" --out "$APP_NAME.iconset/icon_128x128.png"
+            sips -s format png -z 256 256   "$ICON_PNG" --out "$APP_NAME.iconset/icon_128x128@2x.png"
+            sips -s format png -z 256 256   "$ICON_PNG" --out "$APP_NAME.iconset/icon_256x256.png"
+            sips -s format png -z 512 512   "$ICON_PNG" --out "$APP_NAME.iconset/icon_256x256@2x.png"
+            sips -s format png -z 512 512   "$ICON_PNG" --out "$APP_NAME.iconset/icon_512x512.png"
+            sips -s format png -z 1024 1024 "$ICON_PNG" --out "$APP_NAME.iconset/icon_512x512@2x.png"
+            iconutil -c icns "$APP_NAME.iconset"
+            rm -rf "$APP_NAME.iconset"
+          fi
+
+          # 2. Assemble App Bundle
+          echo "📦 Creating App Bundle structure..."
+          rm -rf "$APP_BUNDLE"
+          mkdir -p "$APP_BUNDLE/Contents/MacOS"
+          mkdir -p "$APP_BUNDLE/Contents/Resources"
+
+          echo "🚀 Copying release binary..."
+          cp "$BUILD_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"
+
+          if [ -f "$ICON_ICNS" ]; then
+            echo "🖼️  Copying icon..."
+            cp "$ICON_ICNS" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+          fi
+
+          echo "📄 Generating Info.plist..."
+          cat <<'EOF' > "$APP_BUNDLE/Contents/Info.plist"
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>MacBackup</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.user.MacBackup</string>
+              <key>CFBundleName</key>
+              <string>MacBackup</string>
+              <key>CFBundleIconFile</key>
+              <string>AppIcon</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>13.0</string>
+              <key>LSUIElement</key>
+              <true/>
+              <key>NSHighResolutionCapable</key>
+              <true/>
+              <key>CFBundleURLTypes</key>
+              <array>
+                  <dict>
+                      <key>CFBundleURLName</key>
+                      <string>MacBackup</string>
+                      <key>CFBundleURLSchemes</key>
+                      <array>
+                          <string>macbackup</string>
+                      </array>
+                  </dict>
+              </array>
+          </dict>
+          </plist>
+          EOF
+
+          # 3. Create DMG Image
+          echo "💿 Creating DMG image..."
+          rm -f "$DMG_NAME"
+          DMG_TEMP="dmg_temp"
+          rm -rf "$DMG_TEMP"
+          mkdir -p "$DMG_TEMP"
+          cp -R "$APP_BUNDLE" "$DMG_TEMP/"
+          ln -s /Applications "$DMG_TEMP/Applications"
+
+          hdiutil create -volname "$APP_NAME Installer" -srcfolder "$DMG_TEMP" -ov -format UDZO "$DMG_NAME"
+
+          # 4. Clean up temporary files
+          rm -rf "$APP_BUNDLE"
+          rm -rf "$DMG_TEMP"
+          echo "✅ DMG build complete: $DMG_NAME"
 
       - name: Upload DMG Artifact
         uses: actions/upload-artifact@v4

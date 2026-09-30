@@ -70,16 +70,13 @@ swift build
 swift run MacBackup
 ```
 
-### 2. Create the Release Application & DMG Installer
+### 2. Download or Build the DMG Installer
 
-A standalone build script is included that handles app bundle generation, icon formatting, and `.dmg` packaging:
-
-```bash
-chmod +x build_dmg.sh
-./build_dmg.sh
-```
-
-Upon completion, `MacBackup.dmg` is generated in the root directory. Double-click the DMG and drag **MacBackup.app** to your `/Applications` folder.
+- **Automated CI/CD Builds**: Every push and pull request automatically triggers GitHub Actions to compile the app and assemble `MacBackup.dmg`. You can download the latest ready-to-use installer `.dmg` directly from the **Actions** tab artifacts in the GitHub repository.
+- **Local Release Build**: To build the optimized release binary on your Mac:
+  ```bash
+  swift build -c release
+  ```
 
 ---
 
@@ -137,7 +134,7 @@ flowchart TD
 MacBackup includes a GitHub Actions workflow (`.github/workflows/build.yml`) that runs on `macos-latest`:
 
 - Validates Swift build in Release mode.
-- Executes `build_dmg.sh` to produce a signed/packaged `.dmg` installer.
+- Compiles the application bundle and packages it into `MacBackup.dmg`.
 - Uploads the resulting `MacBackup.dmg` installer directly as a build artifact for every push and pull request.
 
 ---
