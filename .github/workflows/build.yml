@@ -1,0 +1,44 @@
+name: Build & Package MacBackup
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build macOS Application & DMG
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show developer environment
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Build Swift Package (Release)
+        run: |
+          swift build -c release
+
+      - name: Build Application Bundle & DMG Installer
+        run: |
+          chmod +x build_dmg.sh
+          ./build_dmg.sh
+
+      - name: Upload DMG Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MacBackup-dmg
+          path: MacBackup.dmg
+          if-no-files-found: error
+          retention-days: 14
