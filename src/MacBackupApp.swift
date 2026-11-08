@@ -37,9 +37,13 @@ struct MacBackupApp: App {
                 showWindow()
             }
             
-            if backupManager.isDriveConnected {
+            if backupManager.isDriveConnected && !backupManager.isMigrationMode {
                 Button("Start Backup Now") {
                     backupManager.performBackup()
+                }
+            } else if backupManager.isMigrationMode {
+                Button("Migration Action Needed...") {
+                    showWindow()
                 }
             }
             
@@ -54,7 +58,7 @@ struct MacBackupApp: App {
                 if backupManager.isDriveConnected {
                     Image(systemName: "circle.fill")
                         .symbolRenderingMode(.palette)
-                        .foregroundStyle(.green)
+                        .foregroundStyle(backupManager.isMigrationMode ? .orange : .green)
                 } else {
                     Image(systemName: "circle.fill")
                         .symbolRenderingMode(.palette)

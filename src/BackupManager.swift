@@ -24,55 +24,106 @@ import AppKit
 import SwiftUI
 import CryptoKit
 
-struct FileSystemNode: Identifiable {
-    var id: String { url.path }
-    let url: URL
-    let name: String
-    let isDirectory: Bool
-    let modificationDate: Date
-    let size: Int64
-    var isOrphaned: Bool
-    var children: [FileSystemNode]?
+public struct FileSystemNode: Identifiable {
+    public var id: String { url.path }
+    public let url: URL
+    public let name: String
+    public let isDirectory: Bool
+    public let modificationDate: Date
+    public let size: Int64
+    public var isOrphaned: Bool
+    public var isVersionedArchive: Bool
+    public var children: [FileSystemNode]?
+
+    public init(
+        url: URL,
+        name: String,
+        isDirectory: Bool,
+        modificationDate: Date,
+        size: Int64,
+        isOrphaned: Bool = false,
+        isVersionedArchive: Bool = false,
+        children: [FileSystemNode]? = nil
+    ) {
+        self.url = url
+        self.name = name
+        self.isDirectory = isDirectory
+        self.modificationDate = modificationDate
+        self.size = size
+        self.isOrphaned = isOrphaned
+        self.isVersionedArchive = isVersionedArchive
+        self.children = children
+    }
 }
 
-class BackupManager: ObservableObject {
-    @Published var sourceFolders: [URL] = []
-    @Published var targetFolder: URL?
-    @Published var targetNodes: [FileSystemNode] = []
-    @Published var isBackingUp = false
-    @Published var backupStatus = ""
-    
-    @Published var showingBackupPrompt = false
-    @Published var checkedNodes: Set<String> = []
-    @Published var isDriveConnected = false
-    
-    @AppStorage("registeredDriveUUID") var registeredDriveUUID: String = ""
-    @AppStorage("savedTargetFolderPath") var savedTargetFolderPath: String = ""
-    @AppStorage("savedSourceFolderPaths") var savedSourceFolderPaths: String = ""
-    @AppStorage("savedLastBackupDate") var savedLastBackupDate: Double = 0
+public enum DriveRegistrationState: Equatable {
+    case disconnected
+    case unregistered
+    case pairedThisMac
+    case pairedOtherMac
+}
 
-    @Published var lastBackupDate: Date?
-    @Published var newFilesAdded: Int = 0
-    @Published var modifiedFilesUpdated: Int = 0
-    @Published var pendingBackupPercentage: Double = 0
+public enum ConflictPolicy: String, CaseIterable, Identifiable {
+    case keepBoth = "Keep Both (Append (Restored))"
+    case overwrite = "Overwrite Existing"
+    case skip = "Skip If Exists"
+
+    public var id: String { rawValue }
+}
+
+public class BackupManager: ObservableObject {
+    @Published public var sourceFolders: [URL] = []
+    @Published public var targetFolder: URL?
+    @Published public var targetNodes: [FileSystemNode] = []
+    
+    // Backup State
+    @Published public var isBackingUp = false
+    @Published public var backupStatus = ""
+    @Published public var showingBackupPrompt = false
+    @Published public var checkedNodes: Set<String> = []
+    @Published public var isDriveConnected = false
+    @Published public var pendingBackupPercentage: Double = 0
+    @Published public var lastBackupDate: Date?
+    @Published public var newFilesAdded: Int = 0
+    @Published public var modifiedFilesUpdated: Int = 0
+
+    // Drive & Machine Lifecycle
+    @Published public var driveState: DriveRegistrationState = .disconnected
+    @Published public var currentManifest: BackupManifest? = nil
+    @Published public var isMigrationMode: Bool = false
+    @Published public var orphanSafetyLocked: Bool = false
+
+    // Restore State
+    @Published public var isRestoring = false
+    @Published public var restoreStatus = ""
+    @Published public var restoreProgress: Double = 0.0
+    @Published public var restoredFilesCount: Int = 0
+
+    // Stored Preferences
+    @AppStorage("registeredDriveUUID") public var registeredDriveUUID: String = ""
+    @AppStorage("savedTargetFolderPath") public var savedTargetFolderPath: String = ""
+    @AppStorage("savedSourceFolderPaths") public var savedSourceFolderPaths: String = ""
+    @AppStorage("savedLastBackupDate") public var savedLastBackupDate: Double = 0
 
     private let fileManager = FileManager.default
     private var cancellables = Set<AnyCancellable>()
     private var activityToken: NSObjectProtocol?
 
-    init() {
+    public init() {
         if savedLastBackupDate > 0 {
             lastBackupDate = Date(timeIntervalSince1970: savedLastBackupDate)
         }
         
         if !savedSourceFolderPaths.isEmpty {
             let paths = savedSourceFolderPaths.components(separatedBy: "|")
-            sourceFolders = paths.map { URL(fileURLWithPath: $0) }
+            sourceFolders = paths.compactMap { path in
+                let url = URL(fileURLWithPath: path)
+                return fileManager.fileExists(atPath: url.path) ? url : nil
+            }
         }
         
         if !savedTargetFolderPath.isEmpty {
             targetFolder = URL(fileURLWithPath: savedTargetFolderPath)
-            refreshTargetFiles()
         }
         
         checkDriveConnectionStatus()
@@ -90,22 +141,52 @@ class BackupManager: ObservableObject {
             .store(in: &cancellables)
     }
 
-    private func checkDriveConnectionStatus() {
+    // MARK: - Drive Connection & Status
+
+    public func checkDriveConnectionStatus() {
         guard !registeredDriveUUID.isEmpty else {
             isDriveConnected = false
+            driveState = .unregistered
             return
         }
+        
         let mountedVolumes = fileManager.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeUUIDStringKey], options: []) ?? []
-        isDriveConnected = mountedVolumes.contains { url in
+        let matchingVolume = mountedVolumes.first { url in
             (try? url.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString) == registeredDriveUUID
         }
+        
+        isDriveConnected = matchingVolume != nil
+        if isDriveConnected, let target = targetFolder, fileManager.fileExists(atPath: target.path) {
+            inspectTargetFolder(target)
+        } else {
+            driveState = .disconnected
+        }
+    }
+
+    private func inspectTargetFolder(_ folder: URL) {
+        if let manifest = ManifestManager.load(from: folder) {
+            currentManifest = manifest
+            let localMachine = MachineMetadata.current()
+            if manifest.lastBackupMachine.machineId == localMachine.machineId {
+                driveState = .pairedThisMac
+                isMigrationMode = false
+            } else {
+                driveState = .pairedOtherMac
+                isMigrationMode = true
+            }
+        } else {
+            currentManifest = nil
+            driveState = .unregistered
+            isMigrationMode = false
+        }
+        refreshTargetFiles()
+        calculateSyncStatus()
     }
 
     private func handleDriveMount(notification: Notification) {
         guard let volumeURL = notification.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL else { return }
         
         if let uuid = try? volumeURL.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString, uuid == registeredDriveUUID {
-            print("Registered Backup Drive Mounted!")
             DispatchQueue.main.async {
                 self.isDriveConnected = true
                 let targetURL = URL(fileURLWithPath: self.savedTargetFolderPath)
@@ -117,13 +198,17 @@ class BackupManager: ObservableObject {
                     self.targetFolder = targetURL
                 }
                 
-                self.refreshTargetFiles()
-                self.calculateSyncStatus()
+                if let target = self.targetFolder {
+                    self.inspectTargetFolder(target)
+                }
+                
                 NotificationCenter.default.post(name: Notification.Name("RegisteredDriveMounted"), object: nil)
                 
                 // Bring app to foreground
                 NSApp.activate(ignoringOtherApps: true)
-                self.showingBackupPrompt = true
+                if !self.isMigrationMode {
+                    self.showingBackupPrompt = true
+                }
             }
         }
     }
@@ -134,11 +219,16 @@ class BackupManager: ObservableObject {
             if !self.isDriveConnected {
                 self.targetFolder = nil
                 self.targetNodes = []
+                self.currentManifest = nil
+                self.driveState = .disconnected
+                self.isMigrationMode = false
             }
         }
     }
 
-    func selectSourceFolders() {
+    // MARK: - Registration & Deregistration
+
+    public func selectSourceFolders() {
         let panel = NSOpenPanel()
         panel.title = "Select Source Folders"
         panel.canChooseFiles = false
@@ -153,7 +243,7 @@ class BackupManager: ObservableObject {
         }
     }
 
-    func selectTargetFolder() {
+    public func selectTargetFolder() {
         let panel = NSOpenPanel()
         panel.title = "Select Target (USB) Folder"
         panel.canChooseFiles = false
@@ -168,22 +258,72 @@ class BackupManager: ObservableObject {
                 registeredDriveUUID = uuid
             }
             
+            // Check for existing manifest or initialize new one
+            if let manifest = ManifestManager.load(from: url) {
+                currentManifest = manifest
+                let localMachine = MachineMetadata.current()
+                if manifest.lastBackupMachine.machineId == localMachine.machineId {
+                    driveState = .pairedThisMac
+                    isMigrationMode = false
+                } else {
+                    driveState = .pairedOtherMac
+                    isMigrationMode = true
+                }
+            } else {
+                let friendly = url.lastPathComponent.isEmpty ? "Backup Drive" : url.lastPathComponent
+                let newManifest = BackupManifest(friendlyName: friendly)
+                try? ManifestManager.save(newManifest, to: url)
+                currentManifest = newManifest
+                driveState = .pairedThisMac
+                isMigrationMode = false
+            }
+            
             checkDriveConnectionStatus()
             refreshTargetFiles()
             calculateSyncStatus()
         }
     }
-    
-    func ejectDrive() {
+
+    public func deregisterFromThisMac() {
+        registeredDriveUUID = ""
+        savedTargetFolderPath = ""
+        targetFolder = nil
+        targetNodes = []
+        currentManifest = nil
+        isDriveConnected = false
+        driveState = .disconnected
+        isMigrationMode = false
+        backupStatus = "Drive deregistered from this Mac."
+    }
+
+    public func deregisterAndWipeMetadata() {
+        guard let target = targetFolder else { return }
+        try? ManifestManager.delete(from: target)
+        deregisterFromThisMac()
+        backupStatus = "Drive deregistered and backup metadata erased."
+    }
+
+    public func adoptBackupForThisMac() {
+        guard let target = targetFolder, var manifest = currentManifest else { return }
+        manifest.lastBackupMachine = .current()
+        manifest.updatedAt = Date()
+        try? ManifestManager.save(manifest, to: target)
+        currentManifest = manifest
+        driveState = .pairedThisMac
+        isMigrationMode = false
+        refreshTargetFiles()
+        calculateSyncStatus()
+        backupStatus = "Drive paired with this Mac successfully!"
+    }
+
+    public func ejectDrive() {
         guard let url = targetFolder else { return }
-        // Find the volume root
         guard let volumeURL = try? url.resourceValues(forKeys: [.volumeURLKey]).volume else { return }
         
         do {
             try NSWorkspace.shared.unmountAndEjectDevice(at: volumeURL)
             DispatchQueue.main.async {
                 self.backupStatus = "Drive safely ejected!"
-                // handleDriveUnmount will trigger and clear the targetFolder and UI
             }
         } catch {
             DispatchQueue.main.async {
@@ -191,7 +331,9 @@ class BackupManager: ObservableObject {
             }
         }
     }
-    
+
+    // MARK: - SHA-256 Hashing & Safe Copying
+
     private func hashFile(url: URL) -> String? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
@@ -252,7 +394,9 @@ class BackupManager: ObservableObject {
         try fileManager.moveItem(at: tmpTarget, to: target)
     }
 
-    func performBackup() {
+    // MARK: - Backup Execution
+
+    public func performBackup() {
         guard !sourceFolders.isEmpty, let target = targetFolder else { return }
         
         isBackingUp = true
@@ -274,6 +418,21 @@ class BackupManager: ObservableObject {
             }
             
             do {
+                // Update manifest source mappings
+                var updatedSources: [SourceMapping] = []
+                let homePath = FileManager.default.homeDirectoryForCurrentUser.path
+                for source in self.sourceFolders {
+                    let relHome = source.path.hasPrefix(homePath) ? String(source.path.dropFirst(homePath.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/")) : nil
+                    updatedSources.append(SourceMapping(folderName: source.lastPathComponent, relativeHomePath: relHome, lastKnownPath: source.path))
+                }
+                
+                var manifest = self.currentManifest ?? BackupManifest(friendlyName: target.lastPathComponent)
+                manifest.sources = updatedSources
+                manifest.lastBackupMachine = .current()
+                manifest.updatedAt = Date()
+                try? ManifestManager.save(manifest, to: target)
+                DispatchQueue.main.async { self.currentManifest = manifest }
+
                 for source in self.sourceFolders {
                     let resourceKeys: [URLResourceKey] = [.contentModificationDateKey]
                     let enumerator = self.fileManager.enumerator(at: source, includingPropertiesForKeys: resourceKeys, options: [.skipsHiddenFiles])
@@ -352,14 +511,188 @@ class BackupManager: ObservableObject {
         }
     }
 
-    func refreshTargetFiles() {
+    // MARK: - Restore Engine (Reverse Staging with SHA-256)
+
+    private func safeRestoreAndVerify(source: URL, target: URL, conflictPolicy: ConflictPolicy) throws {
+        var finalTarget = target
+        if fileManager.fileExists(atPath: target.path) {
+            switch conflictPolicy {
+            case .skip:
+                return
+            case .overwrite:
+                break
+            case .keepBoth:
+                let ext = target.pathExtension
+                let name = target.deletingPathExtension().lastPathComponent
+                let dir = target.deletingLastPathComponent()
+                var counter = 1
+                var candidate = dir.appendingPathComponent("\(name) (Restored).\(ext)")
+                while fileManager.fileExists(atPath: candidate.path) {
+                    counter += 1
+                    candidate = dir.appendingPathComponent("\(name) (Restored \(counter)).\(ext)")
+                }
+                finalTarget = candidate
+            }
+        }
+
+        let targetDir = finalTarget.deletingLastPathComponent()
+        if !fileManager.fileExists(atPath: targetDir.path) {
+            try fileManager.createDirectory(at: targetDir, withIntermediateDirectories: true, attributes: nil)
+        }
+
+        let tmpTarget = finalTarget.appendingPathExtension("tmp")
+        if fileManager.fileExists(atPath: tmpTarget.path) {
+            try fileManager.removeItem(at: tmpTarget)
+        }
+
+        // 1. Copy to tmp
+        try performWithRetry {
+            try fileManager.copyItem(at: source, to: tmpTarget)
+        }
+
+        // 2. Hash check
+        guard let sourceHash = hashFile(url: source),
+              let targetHash = hashFile(url: tmpTarget) else {
+            try? fileManager.removeItem(at: tmpTarget)
+            throw NSError(domain: "RestoreEngine", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to read file for hashing."])
+        }
+
+        if sourceHash != targetHash {
+            try? fileManager.removeItem(at: tmpTarget)
+            throw NSError(domain: "RestoreEngine", code: 2, userInfo: [NSLocalizedDescriptionKey: "Checksum mismatch during restore: Data corruption detected."])
+        }
+
+        // 3. Move tmp to final target
+        if fileManager.fileExists(atPath: finalTarget.path) {
+            try fileManager.removeItem(at: finalTarget)
+        }
+        try fileManager.moveItem(at: tmpTarget, to: finalTarget)
+    }
+
+    private func restoreNodeRecursively(_ node: FileSystemNode, relativeToBase: URL, destinationBase: URL, conflictPolicy: ConflictPolicy) throws {
+        if node.isDirectory {
+            if let children = node.children {
+                for child in children {
+                    try restoreNodeRecursively(child, relativeToBase: relativeToBase, destinationBase: destinationBase, conflictPolicy: conflictPolicy)
+                }
+            }
+        } else {
+            let relativePath = node.url.path.replacingOccurrences(of: relativeToBase.path + "/", with: "")
+            let destURL = destinationBase.appendingPathComponent(relativePath)
+            try safeRestoreAndVerify(source: node.url, target: destURL, conflictPolicy: conflictPolicy)
+            DispatchQueue.main.async {
+                self.restoredFilesCount += 1
+                self.restoreStatus = "Restored: \(node.name)"
+            }
+        }
+    }
+
+    public func performFullRestore(to destinationBaseURL: URL, conflictPolicy: ConflictPolicy = .keepBoth) {
+        guard let target = targetFolder else { return }
+        
+        isRestoring = true
+        restoreStatus = "Starting full restore..."
+        restoredFilesCount = 0
+        restoreProgress = 0.0
+        
+        activityToken = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "Running Restore")
+        
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            
+            defer {
+                if let token = self.activityToken {
+                    ProcessInfo.processInfo.endActivity(token)
+                    self.activityToken = nil
+                }
+            }
+            
+            do {
+                for node in self.targetNodes {
+                    if node.name == ManifestManager.manifestDirectoryName { continue }
+                    try self.restoreNodeRecursively(node, relativeToBase: target, destinationBase: destinationBaseURL, conflictPolicy: conflictPolicy)
+                }
+                
+                DispatchQueue.main.async {
+                    self.restoreStatus = "Restore completed successfully! \(self.restoredFilesCount) files restored."
+                    self.isRestoring = false
+                    self.restoreProgress = 1.0
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.restoreStatus = "Restore Failed: \(error.localizedDescription)"
+                    self.isRestoring = false
+                }
+            }
+        }
+    }
+
+    public func performSelectiveRestore(nodes: [FileSystemNode], destinationURL: URL, conflictPolicy: ConflictPolicy = .keepBoth) {
+        guard let target = targetFolder else { return }
+        
+        isRestoring = true
+        restoreStatus = "Restoring selected items..."
+        restoredFilesCount = 0
+        restoreProgress = 0.0
+        
+        activityToken = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "Running Selective Restore")
+        
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            
+            defer {
+                if let token = self.activityToken {
+                    ProcessInfo.processInfo.endActivity(token)
+                    self.activityToken = nil
+                }
+            }
+            
+            do {
+                for node in nodes {
+                    if node.isDirectory {
+                        try self.restoreNodeRecursively(node, relativeToBase: target, destinationBase: destinationURL, conflictPolicy: conflictPolicy)
+                    } else {
+                        let destFile = destinationURL.appendingPathComponent(node.name)
+                        try self.safeRestoreAndVerify(source: node.url, target: destFile, conflictPolicy: conflictPolicy)
+                        DispatchQueue.main.async {
+                            self.restoredFilesCount += 1
+                            self.restoreStatus = "Restored: \(node.name)"
+                        }
+                    }
+                }
+                
+                DispatchQueue.main.async {
+                    self.restoreStatus = "Selected files restored successfully!"
+                    self.isRestoring = false
+                    self.restoreProgress = 1.0
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.restoreStatus = "Restore Failed: \(error.localizedDescription)"
+                    self.isRestoring = false
+                }
+            }
+        }
+    }
+
+    // MARK: - Tree Building & Orphan Safety
+
+    public func refreshTargetFiles() {
         guard let target = targetFolder else { return }
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             let nodes = self.buildTree(for: target, targetRoot: target)
+            
+            // Check orphan safety guard
+            let allLeaves = self.flattenNodes(nodes).filter { !$0.isDirectory }
+            let orphanLeaves = allLeaves.filter { $0.isOrphaned }
+            let orphanRatio = allLeaves.isEmpty ? 0 : Double(orphanLeaves.count) / Double(allLeaves.count)
+            let isLocked = self.isMigrationMode || self.sourceFolders.isEmpty || (orphanRatio > 0.5 && allLeaves.count > 10)
+            
             DispatchQueue.main.async {
                 self.targetNodes = nodes
+                self.orphanSafetyLocked = isLocked
             }
         }
     }
@@ -373,30 +706,42 @@ class BackupManager: ObservableObject {
         }
         
         for itemURL in contents {
+            if itemURL.lastPathComponent == ManifestManager.manifestDirectoryName {
+                continue
+            }
+            
             let attr = try? itemURL.resourceValues(forKeys: Set(keys))
             let isDir = attr?.isDirectory ?? false
             let modDate = attr?.contentModificationDate ?? Date()
             let size = Int64(attr?.fileSize ?? 0)
             
+            let isVersioned = itemURL.lastPathComponent.range(of: "_\\d{8}_\\d{6}\\.", options: .regularExpression) != nil
+            
             let relativePath = itemURL.path.replacingOccurrences(of: targetRoot.path + "/", with: "")
             let baseRelativePath = relativePath.replacingOccurrences(of: "_\\d{8}_\\d{6}", with: "", options: .regularExpression)
             
             var foundInSource = false
-            for source in self.sourceFolders {
-                let sourceParentPath = source.deletingLastPathComponent().path + "/"
-                let expectedSourcePath = sourceParentPath + baseRelativePath
-                if self.fileManager.fileExists(atPath: expectedSourcePath) {
-                    foundInSource = true
-                    break
+            if !isMigrationMode && !sourceFolders.isEmpty {
+                for source in self.sourceFolders {
+                    let sourceParentPath = source.deletingLastPathComponent().path + "/"
+                    let expectedSourcePath = sourceParentPath + baseRelativePath
+                    if self.fileManager.fileExists(atPath: expectedSourcePath) {
+                        foundInSource = true
+                        break
+                    }
                 }
+            } else {
+                // In migration mode or before sources are set, NEVER treat files as orphaned
+                foundInSource = true
             }
+            
             let isOrphaned = !foundInSource
             
             if isDir {
                 let children = buildTree(for: itemURL, targetRoot: targetRoot)
-                nodes.append(FileSystemNode(url: itemURL, name: itemURL.lastPathComponent, isDirectory: true, modificationDate: modDate, size: size, isOrphaned: isOrphaned, children: children.isEmpty ? nil : children))
+                nodes.append(FileSystemNode(url: itemURL, name: itemURL.lastPathComponent, isDirectory: true, modificationDate: modDate, size: size, isOrphaned: isOrphaned, isVersionedArchive: false, children: children.isEmpty ? nil : children))
             } else {
-                nodes.append(FileSystemNode(url: itemURL, name: itemURL.lastPathComponent, isDirectory: false, modificationDate: modDate, size: size, isOrphaned: isOrphaned, children: nil))
+                nodes.append(FileSystemNode(url: itemURL, name: itemURL.lastPathComponent, isDirectory: false, modificationDate: modDate, size: size, isOrphaned: isOrphaned, isVersionedArchive: isVersioned, children: nil))
             }
         }
         
@@ -409,8 +754,27 @@ class BackupManager: ObservableObject {
         
         return nodes
     }
+
+    public func flattenNodes(_ nodes: [FileSystemNode]) -> [FileSystemNode] {
+        var result: [FileSystemNode] = []
+        for node in nodes {
+            result.append(node)
+            if let children = node.children {
+                result.append(contentsOf: flattenNodes(children))
+            }
+        }
+        return result
+    }
+
+    public var allOrphans: [FileSystemNode] {
+        flattenNodes(targetNodes).filter { $0.isOrphaned && !$0.isDirectory }
+    }
+
+    public var allVersionedArchives: [FileSystemNode] {
+        flattenNodes(targetNodes).filter { $0.isVersionedArchive && !$0.isDirectory }
+    }
     
-    func findNode(by id: String, in nodes: [FileSystemNode]? = nil) -> FileSystemNode? {
+    public func findNode(by id: String, in nodes: [FileSystemNode]? = nil) -> FileSystemNode? {
         let searchNodes = nodes ?? targetNodes
         for node in searchNodes {
             if node.id == id { return node }
@@ -421,7 +785,11 @@ class BackupManager: ObservableObject {
         return nil
     }
     
-    func deleteNode(_ node: FileSystemNode) {
+    public func deleteNode(_ node: FileSystemNode) {
+        guard !orphanSafetyLocked || !node.isOrphaned else {
+            backupStatus = "Deletion blocked: Orphan safety lock is active."
+            return
+        }
         do {
             try fileManager.removeItem(at: node.url)
             refreshTargetFiles()
@@ -430,7 +798,11 @@ class BackupManager: ObservableObject {
         }
     }
     
-    func deleteSelectedNodes() {
+    public func deleteSelectedNodes() {
+        guard !orphanSafetyLocked else {
+            backupStatus = "Bulk deletion blocked: Orphan safety lock is active."
+            return
+        }
         let nodesToDelete = checkedNodes.compactMap { findNode(by: $0) }
         for node in nodesToDelete {
             try? fileManager.removeItem(at: node.url)
@@ -438,8 +810,25 @@ class BackupManager: ObservableObject {
         checkedNodes.removeAll()
         refreshTargetFiles()
     }
+
+    public func recoverOrphan(node: FileSystemNode, to destinationURL: URL?) {
+        let destDir = destinationURL ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Restored_Orphans")
+        try? fileManager.createDirectory(at: destDir, withIntermediateDirectories: true, attributes: nil)
+        let targetFile = destDir.appendingPathComponent(node.name)
+        try? safeRestoreAndVerify(source: node.url, target: targetFile, conflictPolicy: .keepBoth)
+        backupStatus = "Recovered \(node.name) to \(destDir.lastPathComponent)"
+    }
+
+    public func recoverSelectedOrphans(to destinationURL: URL?) {
+        let destDir = destinationURL ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Restored_Orphans")
+        let orphansToRecover = checkedNodes.compactMap { findNode(by: $0) }.filter { $0.isOrphaned }
+        for node in orphansToRecover {
+            recoverOrphan(node: node, to: destDir)
+        }
+        checkedNodes.removeAll()
+    }
     
-    func calculateSyncStatus() {
+    public func calculateSyncStatus() {
         guard !sourceFolders.isEmpty, let target = targetFolder else {
             DispatchQueue.main.async { self.pendingBackupPercentage = 0 }
             return
@@ -476,7 +865,6 @@ class BackupManager: ObservableObject {
                         let sourceDate = sourceAttr?[.modificationDate] as? Date ?? Date()
                         let targetDate = targetAttr?[.modificationDate] as? Date ?? Date.distantPast
                         
-                        // Use a small buffer for modification date comparison (1.1s)
                         if sourceDate.timeIntervalSince(targetDate) > 1.1 {
                             outOfSyncFiles += 1
                         }

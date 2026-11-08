@@ -1,6 +1,7 @@
 # MacBackup
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/Version-1.1.0-blue.svg)](https://github.com/rituparnaprof/macbackup/releases)
 [![Platform](https://img.shields.io/badge/Platform-macOS%2013%2B-lightgrey.svg)](https://www.apple.com/macos/)
 [![Architecture](https://img.shields.io/badge/Arch-Apple%20Silicon%20(arm64)-orange.svg)](https://www.apple.com/mac/)
 [![Build & Release](https://github.com/rituparnaprof/macbackup/actions/workflows/build.yml/badge.svg)](https://github.com/rituparnaprof/macbackup/actions/workflows/build.yml)
@@ -11,13 +12,15 @@
 
 ## What it does
 
-- **Detects your drive automatically**: Plug in your registered external drive, and the app recognizes it and prompts you to sync right away without having to search for folders.
+- **Detects your drive automatically & supports migration**: Plug in your registered external drive, and the app recognizes it and prompts you to sync right away. If connecting a backup from another MacBook, it automatically switches to Migration Mode, freezes false-orphan markings, and offers a 1-click restore or pairing.
 - **Backs up only what changed**: Only new and modified files are copied over. If an existing backup file has changed on your Mac, the older version is saved with a timestamp instead of being overwritten.
-- **Verifies data integrity**: Every file is staged to a temporary file and verified against the source using SHA-256 checksums before being moved to its final location.
+- **Complete data restoration**: Full machine recovery or selective file/folder restore with configurable collision policies (Keep Both, Overwrite, Skip If Exists) directly to your Mac.
+- **Verifies data integrity both ways**: Every file transferred during backup or restore is staged to a temporary file and verified against the source using SHA-256 checksums before atomic move.
 - **Keeps your Mac awake**: Prevents macOS from sleeping during active transfers, and automatically retries any transient read or write errors up to three times.
-- **Finds deleted files**: Scans the backup drive for files that you have since removed from your Mac SSD, highlighting them as orphaned so you can review or delete them.
+- **Dedicated orphan and archive management**: Scans for files removed from your Mac SSD in a dedicated view, allowing you to recover them back to your Mac or safely delete them with automatic safeguards against accidental bulk deletion.
+- **Robust drive registration & deregistration**: Easily register target drives, unlink from the current Mac, or cleanly erase container metadata without losing backup files.
 - **One-click drive eject**: Safely unmounts and ejects your external drive straight from the application window.
-- **Runs quietly in the menu bar**: Sits in your menu bar with quick status indicators and opens into a full window whenever you want to inspect files or tweak settings.
+- **Runs quietly in the menu bar**: Sits in your menu bar with quick status indicators (green = synced, orange = migration mode, red = disconnected) and opens into a full window whenever you want to inspect files, restore, or tweak settings.
 
 For technical details, component breakdown, and system design, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
