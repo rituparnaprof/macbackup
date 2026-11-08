@@ -1008,19 +1008,34 @@ struct FolderMappingRestoreView: View {
                 Spacer()
                 
                 let activeMappings = backupManager.restoreFolderMappings.filter { $0.isSelected }
-                let totalBytes = activeMappings.reduce(0) { $0 + (includeOrphans ? $1.totalSize : $1.activeSize) }
+                let totalBytes: Int64 = activeMappings.reduce(Int64(0)) { sum, m in
+                    var bytes = m.activeSize
+                    if includeOrphans { bytes += m.orphanSize }
+                    if includeArchives { bytes += m.archiveSize }
+                    return sum + bytes
+                }
                 let freeSSD = backupManager.storageMetrics.macSSDFreeSpace
                 
                 VStack(alignment: .trailing, spacing: 2) {
                     Text("Restore: \(totalBytes.formattedBytes) (\(activeMappings.count) folders)")
                         .font(.caption)
                         .bold()
-                    if !includeOrphans {
-                        let totalOrphans = activeMappings.reduce(0) { $0 + $1.orphanCount }
-                        if totalOrphans > 0 {
-                            Text("\(totalOrphans) orphan(s) excluded")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
+                    HStack(spacing: 4) {
+                        if !includeOrphans {
+                            let totalOrphans = activeMappings.reduce(0) { $0 + $1.orphanCount }
+                            if totalOrphans > 0 {
+                                Text("\(totalOrphans) orphan(s) excluded")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        if !includeArchives {
+                            let totalArchives = activeMappings.reduce(0) { $0 + $1.archiveCount }
+                            if totalArchives > 0 {
+                                Text("\(totalArchives) archive(s) excluded")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
                         }
                     }
                     Text("Mac SSD Free: \(freeSSD.formattedBytes)")
@@ -1090,8 +1105,12 @@ struct FolderMappingRowView: View {
                     .font(.headline)
                     .lineLimit(1)
                 
-                let displayBytes = includeOrphans ? mapping.totalSize : mapping.activeSize
-                let displayCount = includeOrphans ? mapping.fileCount : mapping.activeFileCount
+                let displayBytes = (includeOrphans && includeArchives) ? mapping.totalSize : (
+                    mapping.activeSize + (includeOrphans ? mapping.orphanSize : 0) + (includeArchives ? mapping.archiveSize : 0)
+                )
+                let displayCount = (includeOrphans && includeArchives) ? mapping.fileCount : (
+                    mapping.activeFileCount + (includeOrphans ? mapping.orphanCount : 0) + (includeArchives ? mapping.archiveCount : 0)
+                )
                 
                 HStack(spacing: 6) {
                     Text(displayBytes.formattedBytes)
@@ -1107,6 +1126,11 @@ struct FolderMappingRowView: View {
                 
                 if !includeOrphans && mapping.orphanCount > 0 {
                     Text("\(mapping.orphanCount) orphan(s) excluded")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                }
+                if !includeArchives && mapping.archiveCount > 0 {
+                    Text("\(mapping.archiveCount) archive(s) excluded")
                         .font(.system(size: 9))
                         .foregroundColor(.secondary)
                 }
@@ -1719,7 +1743,7 @@ struct GlobalStatusFooterView: View {
             Divider().frame(height: 12)
             
             VStack(alignment: .trailing, spacing: 0) {
-                Text("v2.4.0")
+                Text("v2.5.0")
                 Text("Made for my Love - DG").italic()
             }
             .font(.system(size: 9))

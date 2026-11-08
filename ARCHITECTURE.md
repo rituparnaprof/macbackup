@@ -1,6 +1,6 @@
 # MacBackup Architecture & Design 🏗️
 
-This document details the internal design, components, and data flow of **MacBackup v2.4.0**.
+This document details the internal design, components, and data flow of **MacBackup v2.5.0**.
 
 ---
 
@@ -12,7 +12,7 @@ flowchart TD
     B --> C{"Check Configured Drive vs /Volumes/*"}
     
     C -- "No drive registered & backup repo found on volume" --> D["Open Setup Assistant Modal Sheet"]
-    C -- "Configured drive connected" --> E{"Inspect Manifest"}
+    C -- "Configured drive connected" --> E{"Inspect Manifest & Catalog"}
     
     subgraph SetupAssistant ["Smart Setup Assistant"]
         D --> D1{"Same Mac or New Mac?"}
@@ -29,9 +29,10 @@ flowchart TD
     D3 --> G
     
     F --> H["Incremental Backup (Mac SSD -> Drive)"]
-    G --> I["Freeze Orphan Detection & Migration Assistant Banner"]
+    H --> CAT["Save .macbackup/catalog.json (Active & Archive Paths)"]
+    G --> I["Load Catalog: Accurate Ground-Truth on New Mac"]
     
-    subgraph RestorePipeline ["Interactive Restore System (v2.4.0)"]
+    subgraph RestorePipeline ["Interactive Restore System (v2.5.0)"]
         G --> R1{"Choose Restore Mode"}
         R1 -- "Folder Mappings (Default)" --> R2["Interactive Source ➔ Destination Mapping"]
         R2 --> R3["Auto-Map to This Mac (~/Documents, ~/Desktop)"]
@@ -40,7 +41,7 @@ flowchart TD
         R1 -- "Browse & Selective Files" --> R6["Granular File Tree Explorer & Search"]
         R6 --> R7["Select Specific Files/Subfolders to Restore"]
         
-        R2 --> R8["Exclude Orphans & Archives by Default (Opt-in Toggles)"]
+        R2 --> R8["Exclude Orphans & Archives by Default (Catalog Verified)"]
         R6 --> R8
         R8 --> R9["Pre-Flight Space Guard & Conflict Policy"]
         R9 --> R10["Atomic Copy, SHA-256 Verification & Live ETA"]
@@ -55,7 +56,7 @@ flowchart TD
     
     subgraph GlobalUI ["Global Persistent UI"]
         UI1["Navigation Detail View (Backup | Restore | Orphan Cleanup)"]
-        UI2["GlobalStatusFooterView (Last Backup, New/Modified Stats, Total Items, v2.4.0, Dedication)"]
+        UI2["GlobalStatusFooterView (Last Backup, New/Modified Stats, Total Items, v2.5.0, Dedication)"]
         UI1 --- UI2
     end
 ```
@@ -65,21 +66,22 @@ flowchart TD
 ## 2. Core Components
 
 ### `BackupManifest.swift`
-- **Data Model**: Implements `BackupManifest`, `SourceMapping`, and `MachineMetadata` conforming to `Codable` and `Sendable`. Versioned at `"2.4.0"`.
-- **On-Disk Manifest**: Stored in a hidden container directory `.macbackup/manifest.json` on the target volume.
+- **Data Model**: Implements `BackupManifest`, `BackupCatalog`, `SourceMapping`, and `MachineMetadata` conforming to `Codable` and `Sendable`. Versioned at `"2.5.0"`.
+- **On-Disk Manifest & Catalog**: Stored in a hidden container directory `.macbackup/manifest.json` and `.macbackup/catalog.json` on the target volume.
+- **Backup Catalog Index (`CatalogManager`)**: Automatically maintains `activeFiles` and `archivedVersions` relative paths. Provides self-contained ground truth for any Mac (especially new Macs during migration or restore) so the drive never has to probe a foreign host SSD to deduce orphans.
 - **Machine Identification**: Compares persistent `machineId` in `UserDefaults` against the manifest's `lastBackupMachine.machineId`.
   - When matching: the current machine is recognized as the owner.
-  - When non-matching: automatically engages **Migration Mode**, freezing orphan marking so that files from the previous Mac are protected from accidental deletion.
+  - When non-matching: automatically engages **Migration Mode**, protecting files from accidental deletion while referencing the drive's catalog for exact file states.
 
 ### `BackupManager.swift`
 The central observable engine (`ObservableObject`), handling all backup, restore, metrics, security checks, and lifecycle events:
-1. **Interactive Source & Destination Restore Mapping & Orphan Exclusion (v2.4.0)**:
-   - `FolderRestoreMapping`: Data model representing each backed-up source folder (`folderName`, `sourceFolderURL`, `destinationURL`, `isSelected`, `totalSize`, `fileCount`, `activeSize`, `activeFileCount`, `orphanCount`, `orphanSize`, `originalPath`).
-   - `refreshRestoreFolderMappings()`: Inspects `targetNodes` and manifest sources to dynamically generate folder mappings. Separates active files from orphaned files (deleted from Mac SSD) and timestamped version archives. Preserves custom user destination choices across view updates.
+1. **Interactive Source & Destination Restore Mapping & Orphan Exclusion (v2.5.0)**:
+   - `FolderRestoreMapping`: Data model representing each backed-up source folder (`folderName`, `sourceFolderURL`, `destinationURL`, `isSelected`, `totalSize`, `fileCount`, `activeSize`, `activeFileCount`, `orphanCount`, `orphanSize`, `archiveCount`, `archiveSize`, `originalPath`).
+   - `refreshRestoreFolderMappings()`: Inspects `targetNodes` and manifest sources to dynamically generate folder mappings. Accurately counts active files, orphaned files (deleted from Mac SSD), and timestamped version archives. Preserves custom user destination choices across view updates.
    - `autoMapRestoreDestinationsToStandardFolders()`: 1-click remapping of all discovered backup folders to standard user directories on this Mac (`~/Documents`, `~/Desktop`, `~/Pictures`, etc.).
    - `setCommonRestoreDestination(_:)`: Directs all selected folders into a user-specified parent directory (e.g. `~/RestoredBackup/Documents`).
    - `performMappedRestore(mappings:conflictPolicy:includeOrphans:includeArchives:)`: Restores selected source folders into their respective target destinations. Defaults to **excluding orphaned files and version archives** (`includeOrphans: false`, `includeArchives: false`) so that deleted files are not resurrected on the Mac, while providing user options to include them when desired. Includes sleep prevention, live ETA, and SHA-256 integrity verification.
-2. **Selective File & Subfolder Restore (v2.4.0)**:
+2. **Selective File & Subfolder Restore (v2.5.0)**:
    - `restoreCheckedNodes`: Dedicated selection set for restoring specific files or subdirectories from the backup file tree.
    - `performSelectiveRestore(nodes:destinationURL:conflictPolicy:includeOrphans:includeArchives:)`: Restores checked items directly into a chosen folder without corrupting parent paths, with orphan and archive filtering.
 3. **Smart Drive Discovery & Interactive Setup Assistant**:
@@ -125,14 +127,15 @@ The central observable engine (`ObservableObject`), handling all backup, restore
     - Prominent confirmation dialog before starting restore.
 - **Global Persistent Status Bar (`GlobalStatusFooterView`)**:
   - Permanently anchored at the base of the application window across all 3 primary tabs (**Backup**, **Restore**, **Orphan Cleanup**).
-  - Displays Last Backup timestamp, New Files count, Modified Files count, Total item count, version string (`v2.4.0`), and dedication (*"Made for my Love - DG"*).
+  - Displays Last Backup timestamp, New Files count, Modified Files count, Total item count, version string (`v2.5.0`), and dedication (*"Made for my Love - DG"*).
 
 ---
 
 ## 3. Data Safety & Integrity Model
 
-| Failure Mode | Mitigation in MacBackup v2.4.0 |
+| Failure Mode | Mitigation in MacBackup v2.5.0 |
 | :--- | :--- |
+| **New Mac Missing Orphan / Archive Markings** | Backup Catalog Index (`catalog.json`) stores ground-truth active and archived paths on drive, working independently of host SSD. |
 | **Accidental Orphan Restoration** | Restore operations filter out orphaned files (deleted from Mac) and version archives by default (`includeOrphans: false`), with explicit UI toggles to opt-in. |
 | **Inflexible Restore Destination** | Source-to-Destination folder mapping allows mapping each backup folder to custom locations. |
 | **Hidden Restore Selection** | Dual-mode restore UI (Folder Mappings + Selective File Tree with search) directly in Restore tab. |

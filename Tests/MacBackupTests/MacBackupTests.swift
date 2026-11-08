@@ -121,7 +121,7 @@ final class MacBackupTests: XCTestCase {
 
     func testManifestSaveAndLoad() throws {
         let manifest = BackupManifest(
-            version: "2.4.0",
+            version: "2.5.0",
             friendlyName: "Samsung T7",
             sources: [
                 SourceMapping(folderName: "Documents", relativeHomePath: "Documents", lastKnownPath: "/Users/test/Documents")
@@ -132,7 +132,7 @@ final class MacBackupTests: XCTestCase {
         let loaded = ManifestManager.load(from: tempDirectory)
 
         XCTAssertNotNil(loaded)
-        XCTAssertEqual(loaded?.version, "2.4.0")
+        XCTAssertEqual(loaded?.version, "2.5.0")
         XCTAssertEqual(loaded?.friendlyName, "Samsung T7")
         XCTAssertEqual(loaded?.sources.count, 1)
         XCTAssertEqual(loaded?.sources.first?.folderName, "Documents")
@@ -143,7 +143,7 @@ final class MacBackupTests: XCTestCase {
         // Manifest created with a different machine ID
         let foreignMachine = MachineMetadata(machineId: "FOREIGN_MACHINE_UUID", hostname: "MacBookPro-Other", username: "alex")
         let manifest = BackupManifest(
-            version: "2.4.0",
+            version: "2.5.0",
             friendlyName: "External Drive",
             lastBackupMachine: foreignMachine
         )
@@ -371,5 +371,77 @@ final class MacBackupTests: XCTestCase {
         }
         
         wait(for: [exp], timeout: 3.0)
+    }
+
+    // MARK: - 9. Backup Catalog Index
+
+    func testCatalogSaveAndLoad() throws {
+        let catalog = BackupCatalog(
+            version: "2.5.0",
+            activeFiles: ["Documents/active.txt", "Desktop/notes.txt"],
+            archivedVersions: ["Documents/active_20261108_120000.txt"]
+        )
+
+        try CatalogManager.save(catalog, to: tempDirectory)
+        let loaded = CatalogManager.load(from: tempDirectory)
+
+        XCTAssertNotNil(loaded)
+        XCTAssertEqual(loaded?.version, "2.5.0")
+        XCTAssertEqual(loaded?.activeFiles.count, 2)
+        XCTAssertTrue(loaded?.activeFiles.contains("Documents/active.txt") == true)
+        XCTAssertTrue(loaded?.archivedVersions.contains("Documents/active_20261108_120000.txt") == true)
+    }
+
+    func testCatalogOrphanAndArchiveDetectionOnNewMac() throws {
+        let backupDir = tempDirectory.appendingPathComponent("TestCatalogBackup")
+        let docsDir = backupDir.appendingPathComponent("Documents")
+        try FileManager.default.createDirectory(at: docsDir, withIntermediateDirectories: true)
+
+        let activeURL = docsDir.appendingPathComponent("report.pdf")
+        let archiveURL = docsDir.appendingPathComponent("report_20261108_120000.pdf")
+        let orphanURL = docsDir.appendingPathComponent("old_deleted.txt")
+
+        try "active".data(using: .utf8)!.write(to: activeURL)
+        try "archived".data(using: .utf8)!.write(to: archiveURL)
+        try "orphan".data(using: .utf8)!.write(to: orphanURL)
+
+        // Save catalog identifying report.pdf as active and report_20261108_120000.pdf as archive
+        let catalog = BackupCatalog(
+            version: "2.5.0",
+            activeFiles: ["Documents/report.pdf"],
+            archivedVersions: ["Documents/report_20261108_120000.pdf"]
+        )
+        try CatalogManager.save(catalog, to: backupDir)
+
+        let manager = BackupManager()
+        manager.targetFolder = backupDir
+        manager.isMigrationMode = true // Simulating New Mac
+        manager.sourceFolders = []     // No local folders configured on new Mac
+        manager.currentCatalog = catalog
+
+        let exp = XCTestExpectation(description: "Scan target files with catalog on new Mac")
+        manager.refreshTargetFiles()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            let activeNode = manager.findNode(by: activeURL.path)
+            let archiveNode = manager.findNode(by: archiveURL.path)
+            let orphanNode = manager.findNode(by: orphanURL.path)
+
+            XCTAssertNotNil(activeNode)
+            XCTAssertFalse(activeNode?.isOrphaned ?? true, "Active file must not be orphaned on new Mac")
+            XCTAssertFalse(activeNode?.isVersionedArchive ?? true, "Active file must not be archive")
+
+            XCTAssertNotNil(archiveNode)
+            XCTAssertTrue(archiveNode?.isVersionedArchive ?? false, "Archive file must be recognized as archive on new Mac")
+            XCTAssertFalse(archiveNode?.isOrphaned ?? true, "Archive file must not be treated as orphan")
+
+            XCTAssertNotNil(orphanNode)
+            XCTAssertTrue(orphanNode?.isOrphaned ?? false, "File missing from catalog must be recognized as orphan on new Mac")
+            XCTAssertFalse(orphanNode?.isVersionedArchive ?? true, "Orphan file must not be treated as archive")
+
+            exp.fulfill()
+        }
+
+        wait(for: [exp], timeout: 2.0)
     }
 }

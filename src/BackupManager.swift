@@ -150,6 +150,8 @@ public struct FolderRestoreMapping: Identifiable, Equatable, Sendable {
     public var activeFileCount: Int
     public var orphanCount: Int
     public var orphanSize: Int64
+    public var archiveCount: Int
+    public var archiveSize: Int64
     public var originalPath: String?
 
     public init(
@@ -163,6 +165,8 @@ public struct FolderRestoreMapping: Identifiable, Equatable, Sendable {
         activeFileCount: Int = 0,
         orphanCount: Int = 0,
         orphanSize: Int64 = 0,
+        archiveCount: Int = 0,
+        archiveSize: Int64 = 0,
         originalPath: String? = nil
     ) {
         self.folderName = folderName
@@ -175,6 +179,8 @@ public struct FolderRestoreMapping: Identifiable, Equatable, Sendable {
         self.activeFileCount = activeFileCount
         self.orphanCount = orphanCount
         self.orphanSize = orphanSize
+        self.archiveCount = archiveCount
+        self.archiveSize = archiveSize
         self.originalPath = originalPath
     }
 }
@@ -208,6 +214,7 @@ public class BackupManager: ObservableObject {
     // Drive & Machine Lifecycle
     @Published public var driveState: DriveRegistrationState = .disconnected
     @Published public var currentManifest: BackupManifest? = nil
+    @Published public var currentCatalog: BackupCatalog? = nil
     @Published public var isMigrationMode: Bool = false
     @Published public var orphanSafetyLocked: Bool = false
 
@@ -239,9 +246,9 @@ public class BackupManager: ObservableObject {
     private let fileManager = FileManager.default
     private var cancellables = Set<AnyCancellable>()
 
-    // Thread-safe pre-compiled archive regex
+    // Thread-safe pre-compiled archive regex (supporting optional collision sequence suffixes like _1)
     private static let archiveRegex: NSRegularExpression = {
-        (try? NSRegularExpression(pattern: "(_|\\.v)\\d{8}_\\d{6}(\\.[^.]+)?$")) ?? (try! NSRegularExpression(pattern: "_\\d{8}_\\d{6}"))
+        (try? NSRegularExpression(pattern: "(_|\\.v)\\d{8}_\\d{6}(_\\d+)?(\\.[^.]+)?$")) ?? (try! NSRegularExpression(pattern: "_\\d{8}_\\d{6}"))
     }()
 
     public init() {
@@ -335,6 +342,7 @@ public class BackupManager: ObservableObject {
             driveState = .unregistered
             isMigrationMode = false
         }
+        currentCatalog = CatalogManager.load(from: folder)
         refreshTargetFiles()
         calculateSyncStatus()
         calculateStorageMetrics()
@@ -549,6 +557,7 @@ public class BackupManager: ObservableObject {
         allOrphans.removeAll()
         allVersionedArchives.removeAll()
         currentManifest = nil
+        currentCatalog = nil
         isDriveConnected = false
         driveState = .disconnected
         isMigrationMode = false
@@ -776,6 +785,8 @@ public class BackupManager: ObservableObject {
             do {
                 var itemsToCopy: [(source: URL, target: URL, isModification: Bool, oldTargetDate: Date?)] = []
                 var bytesToTransfer: Int64 = 0
+                var activeRelativePaths = Set<String>()
+                var archivedRelativePaths = self.currentCatalog?.archivedVersions ?? Set<String>()
                 
                 for source in self.sourceFolders {
                     let sourceParent = source.deletingLastPathComponent()
@@ -796,6 +807,7 @@ public class BackupManager: ObservableObject {
                         guard let relativePath = PathSecurity.relativeSubpath(of: fileURL, relativeTo: sourceParent) else {
                             continue
                         }
+                        activeRelativePaths.insert(relativePath)
                         let targetURL = target.appendingPathComponent(relativePath)
                         
                         let sourceAttr = try? self.fileManager.attributesOfItem(atPath: fileURL.path)
@@ -856,6 +868,9 @@ public class BackupManager: ObservableObject {
                             try self.performWithRetry {
                                 try self.fileManager.moveItem(at: item.target, to: oldTargetURL)
                             }
+                            if let relArch = PathSecurity.relativeSubpath(of: oldTargetURL, relativeTo: target) {
+                                archivedRelativePaths.insert(relArch)
+                            }
                             DispatchQueue.main.async { self.modifiedFilesUpdated += 1 }
                         } else if !item.isModification {
                             DispatchQueue.main.async { self.newFilesAdded += 1 }
@@ -891,8 +906,17 @@ public class BackupManager: ObservableObject {
                 manifest.updatedAt = Date()
                 try? ManifestManager.save(manifest, to: target)
                 
+                let newCatalog = BackupCatalog(
+                    version: "2.5.0",
+                    updatedAt: Date(),
+                    activeFiles: activeRelativePaths,
+                    archivedVersions: archivedRelativePaths
+                )
+                try? CatalogManager.save(newCatalog, to: target)
+                
                 DispatchQueue.main.async {
                     self.currentManifest = manifest
+                    self.currentCatalog = newCatalog
                     self.backupStatus = "Backup completed flawlessly!"
                     self.lastBackupDate = Date()
                     self.savedLastBackupDate = self.lastBackupDate!.timeIntervalSince1970
@@ -1095,6 +1119,7 @@ public class BackupManager: ObservableObject {
             let allLeaves = flattenNodes([node]).filter { !$0.isDirectory }
             let activeLeaves = allLeaves.filter { !$0.isOrphaned && !$0.isVersionedArchive }
             let orphanLeaves = allLeaves.filter { $0.isOrphaned }
+            let archiveLeaves = allLeaves.filter { $0.isVersionedArchive }
             
             let totalBytes = allLeaves.reduce(0) { $0 + $1.size }
             let totalCount = allLeaves.count
@@ -1102,6 +1127,8 @@ public class BackupManager: ObservableObject {
             let activeCount = activeLeaves.count
             let orphanBytes = orphanLeaves.reduce(0) { $0 + $1.size }
             let orphanCount = orphanLeaves.count
+            let archiveBytes = archiveLeaves.reduce(0) { $0 + $1.size }
+            let archiveCount = archiveLeaves.count
             
             newMappings.append(FolderRestoreMapping(
                 folderName: folderName,
@@ -1114,6 +1141,8 @@ public class BackupManager: ObservableObject {
                 activeFileCount: activeCount,
                 orphanCount: orphanCount,
                 orphanSize: orphanBytes,
+                archiveCount: archiveCount,
+                archiveSize: archiveBytes,
                 originalPath: originalPath
             ))
         }
@@ -1125,6 +1154,7 @@ public class BackupManager: ObservableObject {
             let totalBytes = rootFiles.reduce(0) { $0 + $1.size }
             let activeFiles = rootFiles.filter { !$0.isOrphaned && !$0.isVersionedArchive }
             let orphanFiles = rootFiles.filter { $0.isOrphaned }
+            let archiveFiles = rootFiles.filter { $0.isVersionedArchive }
             newMappings.append(FolderRestoreMapping(
                 folderName: "Root Files",
                 sourceFolderURL: target,
@@ -1136,6 +1166,8 @@ public class BackupManager: ObservableObject {
                 activeFileCount: activeFiles.count,
                 orphanCount: orphanFiles.count,
                 orphanSize: orphanFiles.reduce(0) { $0 + $1.size },
+                archiveCount: archiveFiles.count,
+                archiveSize: archiveFiles.reduce(0) { $0 + $1.size },
                 originalPath: target.path
             ))
         }
@@ -1193,8 +1225,11 @@ public class BackupManager: ObservableObject {
         transferRateFormatted = ""
         estimatedTimeRemainingFormatted = ""
         
-        let totalBytes = activeMappings.reduce(0) { sum, m in
-            sum + (includeOrphans ? m.totalSize : m.activeSize)
+        let totalBytes: Int64 = activeMappings.reduce(Int64(0)) { sum, m in
+            var bytes = m.activeSize
+            if includeOrphans { bytes += m.orphanSize }
+            if includeArchives { bytes += m.archiveSize }
+            return sum + bytes
         }
         totalBytesToTransfer = totalBytes
         
@@ -1603,11 +1638,51 @@ public class BackupManager: ObservableObject {
 
     // MARK: - Tree Building & Orphan Safety
 
+    private func synthesizeCatalogIfMissing(target: URL) {
+        guard currentCatalog == nil && !isMigrationMode && !sourceFolders.isEmpty else { return }
+        
+        var activePaths = Set<String>()
+        for source in sourceFolders {
+            let sourceParent = source.deletingLastPathComponent()
+            let keys: [URLResourceKey] = [.isSymbolicLinkKey, .isDirectoryKey]
+            let enumerator = fileManager.enumerator(at: source, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles, .skipsPackageDescendants])
+            while let fileURL = enumerator?.nextObject() as? URL {
+                let vals = try? fileURL.resourceValues(forKeys: Set(keys))
+                if vals?.isSymbolicLink == true || vals?.isDirectory == true { continue }
+                if let rel = PathSecurity.relativeSubpath(of: fileURL, relativeTo: sourceParent) {
+                    activePaths.insert(rel)
+                }
+            }
+        }
+        
+        var archivePaths = Set<String>()
+        let targetKeys: [URLResourceKey] = [.isSymbolicLinkKey, .isDirectoryKey]
+        let targetEnum = fileManager.enumerator(at: target, includingPropertiesForKeys: targetKeys, options: [.skipsHiddenFiles, .skipsPackageDescendants])
+        while let fileURL = targetEnum?.nextObject() as? URL {
+            let vals = try? fileURL.resourceValues(forKeys: Set(targetKeys))
+            if vals?.isSymbolicLink == true || vals?.isDirectory == true { continue }
+            if Self.archiveRegex.firstMatch(in: fileURL.lastPathComponent, options: [], range: NSRange(location: 0, length: fileURL.lastPathComponent.utf16.count)) != nil {
+                if let rel = PathSecurity.relativeSubpath(of: fileURL, relativeTo: target) {
+                    archivePaths.insert(rel)
+                }
+            }
+        }
+        
+        let catalog = BackupCatalog(version: "2.5.0", updatedAt: Date(), activeFiles: activePaths, archivedVersions: archivePaths)
+        try? CatalogManager.save(catalog, to: target)
+        self.currentCatalog = catalog
+    }
+
     public func refreshTargetFiles() {
         guard let target = targetFolder else { return }
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
+            if self.currentCatalog == nil {
+                self.currentCatalog = CatalogManager.load(from: target)
+            }
+            self.synthesizeCatalogIfMissing(target: target)
+            
             let nodes = self.buildTree(for: target, targetRoot: target)
             
             // Build indexed dictionary and cache lists
@@ -1658,34 +1733,70 @@ public class BackupManager: ObservableObject {
             let modDate = attr?.contentModificationDate ?? Date()
             let size = Int64(attr?.fileSize ?? 0)
             
-            let isVersioned = Self.archiveRegex.firstMatch(in: itemURL.lastPathComponent, options: [], range: NSRange(location: 0, length: itemURL.lastPathComponent.utf16.count)) != nil
-            
             guard let relativePath = PathSecurity.relativeSubpath(of: itemURL, relativeTo: targetRoot) else {
                 continue
             }
-            let baseRelativePath = relativePath.replacingOccurrences(of: "(_|\\.v)\\d{8}_\\d{6}(\\.[^.]+)?$", with: "", options: .regularExpression)
-            
-            var foundInSource = false
-            if !isMigrationMode && !sourceFolders.isEmpty {
-                for source in self.sourceFolders {
-                    let sourceParent = source.deletingLastPathComponent()
-                    let expectedSourceURL = sourceParent.appendingPathComponent(baseRelativePath)
-                    if self.fileManager.fileExists(atPath: expectedSourceURL.path) {
-                        foundInSource = true
-                        break
-                    }
-                }
-            } else {
-                foundInSource = true
-            }
-            
-            let isOrphaned = !foundInSource
             
             if isDir {
                 let children = buildTree(for: itemURL, targetRoot: targetRoot)
-                nodes.append(FileSystemNode(url: itemURL, name: itemURL.lastPathComponent, isDirectory: true, modificationDate: modDate, size: size, isOrphaned: isOrphaned, isVersionedArchive: false, children: children.isEmpty ? nil : children))
+                let dirOrphaned = !children.isEmpty && children.allSatisfy { $0.isOrphaned }
+                nodes.append(FileSystemNode(
+                    url: itemURL,
+                    name: itemURL.lastPathComponent,
+                    isDirectory: true,
+                    modificationDate: modDate,
+                    size: size,
+                    isOrphaned: dirOrphaned,
+                    isVersionedArchive: false,
+                    children: children.isEmpty ? nil : children
+                ))
             } else {
-                nodes.append(FileSystemNode(url: itemURL, name: itemURL.lastPathComponent, isDirectory: false, modificationDate: modDate, size: size, isOrphaned: isOrphaned, isVersionedArchive: isVersioned, children: nil))
+                let isVersioned: Bool
+                let isOrphaned: Bool
+                
+                if let catalog = self.currentCatalog {
+                    // Catalog Index Ground Truth (works accurately across any Mac!)
+                    if catalog.activeFiles.contains(relativePath) {
+                        isVersioned = false
+                        isOrphaned = false
+                    } else if catalog.archivedVersions.contains(relativePath) || Self.archiveRegex.firstMatch(in: itemURL.lastPathComponent, options: [], range: NSRange(location: 0, length: itemURL.lastPathComponent.utf16.count)) != nil {
+                        isVersioned = true
+                        isOrphaned = false
+                    } else {
+                        isVersioned = false
+                        isOrphaned = true
+                    }
+                } else {
+                    // Fallback for legacy backups without catalog.json
+                    isVersioned = Self.archiveRegex.firstMatch(in: itemURL.lastPathComponent, options: [], range: NSRange(location: 0, length: itemURL.lastPathComponent.utf16.count)) != nil
+                    
+                    var foundInSource = false
+                    if !isMigrationMode && !sourceFolders.isEmpty {
+                        let baseRelativePath = relativePath.replacingOccurrences(of: "(_|\\.v)\\d{8}_\\d{6}(_\\d+)?(\\.[^.]+)?$", with: "", options: .regularExpression)
+                        for source in self.sourceFolders {
+                            let sourceParent = source.deletingLastPathComponent()
+                            let expectedSourceURL = sourceParent.appendingPathComponent(baseRelativePath)
+                            if self.fileManager.fileExists(atPath: expectedSourceURL.path) {
+                                foundInSource = true
+                                break
+                            }
+                        }
+                    } else {
+                        foundInSource = true
+                    }
+                    isOrphaned = !isVersioned && !foundInSource
+                }
+                
+                nodes.append(FileSystemNode(
+                    url: itemURL,
+                    name: itemURL.lastPathComponent,
+                    isDirectory: false,
+                    modificationDate: modDate,
+                    size: size,
+                    isOrphaned: isOrphaned,
+                    isVersionedArchive: isVersioned,
+                    children: nil
+                ))
             }
         }
         
@@ -1713,6 +1824,12 @@ public class BackupManager: ObservableObject {
     public func findNode(by id: String, in nodes: [FileSystemNode]? = nil) -> FileSystemNode? {
         if nodes == nil, let fastFound = nodeLookup[id] {
             return fastFound
+        }
+        if nodes == nil {
+            let altId = id.hasPrefix("/var/") ? "/private" + id : (id.hasPrefix("/private/var/") ? String(id.dropFirst(8)) : id)
+            if let altFound = nodeLookup[altId] {
+                return altFound
+            }
         }
         let searchNodes = nodes ?? targetNodes
         for node in searchNodes {

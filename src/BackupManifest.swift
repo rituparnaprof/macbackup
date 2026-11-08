@@ -65,7 +65,7 @@ public struct BackupManifest: Codable, Sendable {
     public var sources: [SourceMapping]
 
     public init(
-        version: String = "2.4.0",
+        version: String = "2.5.0",
         backupContainerId: String = UUID().uuidString,
         friendlyName: String,
         createdAt: Date = Date(),
@@ -116,6 +116,63 @@ public enum ManifestManager {
         let dir = targetFolder.appendingPathComponent(manifestDirectoryName)
         if FileManager.default.fileExists(atPath: dir.path) {
             try FileManager.default.removeItem(at: dir)
+        }
+    }
+}
+
+// MARK: - Backup Catalog Index (Self-Contained File Ground Truth)
+
+public struct BackupCatalog: Codable, Sendable {
+    public var version: String
+    public var updatedAt: Date
+    public var activeFiles: Set<String>
+    public var archivedVersions: Set<String>
+
+    public init(
+        version: String = "2.5.0",
+        updatedAt: Date = Date(),
+        activeFiles: Set<String> = [],
+        archivedVersions: Set<String> = []
+    ) {
+        self.version = version
+        self.updatedAt = updatedAt
+        self.activeFiles = activeFiles
+        self.archivedVersions = archivedVersions
+    }
+}
+
+public enum CatalogManager {
+    public static let catalogFileName = "catalog.json"
+
+    public static func catalogURL(for targetFolder: URL) -> URL {
+        targetFolder.appendingPathComponent(ManifestManager.manifestDirectoryName).appendingPathComponent(catalogFileName)
+    }
+
+    public static func load(from targetFolder: URL) -> BackupCatalog? {
+        let url = catalogURL(for: targetFolder)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode(BackupCatalog.self, from: data)
+    }
+
+    public static func save(_ catalog: BackupCatalog, to targetFolder: URL) throws {
+        let dir = targetFolder.appendingPathComponent(ManifestManager.manifestDirectoryName)
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: nil)
+        }
+        let url = dir.appendingPathComponent(catalogFileName)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(catalog)
+        try data.write(to: url, options: .atomic)
+    }
+
+    public static func delete(from targetFolder: URL) throws {
+        let url = catalogURL(for: targetFolder)
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
         }
     }
 }
