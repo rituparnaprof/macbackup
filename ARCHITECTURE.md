@@ -1,6 +1,6 @@
 # MacBackup Architecture & Design 🏗️
 
-This document details the internal design, components, and data flow of **MacBackup v2.2.0**.
+This document details the internal design, components, and data flow of **MacBackup v2.2.1**.
 
 ---
 
@@ -14,7 +14,7 @@ flowchart TD
     C -- "No drive registered & backup repo found on volume" --> D["Open Setup Assistant Modal Sheet"]
     C -- "Configured drive connected" --> E{"Inspect Manifest"}
     
-    subgraph SetupAssistant ["Smart Setup Assistant (v2.2.0)"]
+    subgraph SetupAssistant ["Smart Setup Assistant (v2.2.1)"]
         D --> D1{"Same Mac or New Mac?"}
         D1 -- "Same Mac" --> D2["1-Click Reconnect & Resume Backups"]
         D1 -- "New Mac" --> D3["1-Click Restore to this Mac"]
@@ -40,9 +40,9 @@ flowchart TD
         OP6["Security Boundary & Symlink Defense"]
     end
     
-    subgraph GlobalUI ["Global Persistent UI (v2.2.0)"]
+    subgraph GlobalUI ["Global Persistent UI (v2.2.1)"]
         UI1["Navigation Detail View (Backup | Restore | Orphan Cleanup)"]
-        UI2["GlobalStatusFooterView (Last Backup, New/Modified Stats, Total Items, v2.2.0, Dedication)"]
+        UI2["GlobalStatusFooterView (Last Backup, New/Modified Stats, Total Items, v2.2.1, Dedication)"]
         UI1 --- UI2
     end
 ```
@@ -52,7 +52,7 @@ flowchart TD
 ## 2. Core Components
 
 ### `BackupManifest.swift`
-- **Data Model**: Implements `BackupManifest`, `SourceMapping`, and `MachineMetadata` conforming to `Codable` and `Sendable`. Versioned at `"2.2.0"`.
+- **Data Model**: Implements `BackupManifest`, `SourceMapping`, and `MachineMetadata` conforming to `Codable` and `Sendable`. Versioned at `"2.2.1"`.
 - **On-Disk Manifest**: Stored in a hidden container directory `.macbackup/manifest.json` on the target volume.
 - **Machine Identification**: Compares persistent `machineId` in `UserDefaults` against the manifest's `lastBackupMachine.machineId`.
   - When matching: the current machine is recognized as the owner.
@@ -60,7 +60,7 @@ flowchart TD
 
 ### `BackupManager.swift`
 The central observable engine (`ObservableObject`), handling all backup, restore, metrics, security checks, and lifecycle events:
-1. **Smart Drive Discovery & Interactive Setup Assistant (v2.2.0)**:
+1. **Smart Drive Discovery & Interactive Setup Assistant (v2.2.1)**:
    - `DiscoveredBackup`: Encapsulates discovered backup volume URL, backup folder URL, manifest metadata, volume display name, and machine matching boolean.
    - `scanMountedVolumesForBackups()`: Scans all mounted volumes (`/Volumes/*`) via `FileManager.default.mountedVolumeURLs` for existing `.macbackup/manifest.json` containers without requiring manual folder picking.
    - `reconnectDiscoveredBackup(_:)`: 1-click reconnection that sets target folder, saves security bookmark, restores source folder paths from manifest, and triggers sync calculation.
@@ -100,7 +100,7 @@ The central observable engine (`ObservableObject`), handling all backup, restore
 ### `ContentView.swift`
 - **Global Persistent Status Bar (`GlobalStatusFooterView`)**:
   - Permanently anchored at the base of the application window across all 3 primary tabs (**Backup**, **Restore**, **Orphan Cleanup**).
-  - Displays Last Backup timestamp, New Files count, Modified Files count, Total item count, version string (`v2.2.0`), and dedication (*"Made for my Love - DG"*).
+  - Displays Last Backup timestamp, New Files count, Modified Files count, Total item count, version string (`v2.2.1`), and dedication (*"Made for my Love - DG"*).
 - **Interactive Setup Assistant Sheet (`SetupAssistantView`)**:
   - Automatically presented when an unregistered or unconfigured drive containing an existing backup container is detected.
   - Presents clear distinction between "Same Mac" (reconnect & resume) and "New Mac" (restore or adopt).
@@ -115,7 +115,7 @@ The central observable engine (`ObservableObject`), handling all backup, restore
 
 ## 3. Data Safety & Integrity Model
 
-| Failure Mode | Mitigation in MacBackup v2.2.0 |
+| Failure Mode | Mitigation in MacBackup v2.2.1 |
 | :--- | :--- |
 | **New Mac / Reinstalled Mac Setup Confusion** | Automated `/Volumes/*` scanner detects backup containers and prompts with guided Setup Assistant sheet. |
 | **Status Bar Hidden on Tab Navigation** | `GlobalStatusFooterView` moved to root `NavigationSplitView detail:`, remaining permanently visible across all tabs. |

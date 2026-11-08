@@ -1,7 +1,7 @@
 # MacBackup
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-2.2.0-blue.svg)](https://github.com/rituparnaprof/macbackup/releases)
+[![Version](https://img.shields.io/badge/Version-2.2.1-blue.svg)](https://github.com/rituparnaprof/macbackup/releases)
 [![Platform](https://img.shields.io/badge/Platform-macOS%2013%2B-lightgrey.svg)](https://www.apple.com/macos/)
 [![Architecture](https://img.shields.io/badge/Arch-Apple%20Silicon%20(arm64)-orange.svg)](https://www.apple.com/mac/)
 [![Build & Release](https://github.com/rituparnaprof/macbackup/actions/workflows/build.yml/badge.svg)](https://github.com/rituparnaprof/macbackup/actions/workflows/build.yml)
@@ -13,7 +13,7 @@
 ## What it does
 
 - **Smart Drive Auto-Discovery & Interactive Setup Assistant**: On app launch or whenever an external drive is attached, MacBackup automatically scans mounted volumes (`/Volumes/*`) for existing `.macbackup/` repositories. An intelligent setup assistant pops up and asks whether this is the **Same Mac** (1-click reconnect and resume backups) or a **New Mac** (1-click restore or pair & adopt), eliminating manual folder picking and configuration confusion.
-- **Global Persistent Status Footer**: Essential sync and backup metrics—Last Backup time, New Files count, Modified Files count, Total Items, release version (`v2.2.0`), and dedication (*"Made for my Love - DG"*)—are permanently visible at the bottom of the window across all views (Backup, Restore, and Orphan Cleanup).
+- **Global Persistent Status Footer**: Essential sync and backup metrics—Last Backup time, New Files count, Modified Files count, Total Items, release version (`v2.2.1`), and dedication (*"Made for my Love - DG"*)—are permanently visible at the bottom of the window across all views (Backup, Restore, and Orphan Cleanup).
 - **Auto-detection & Seamless Migration**: Plug in your registered external drive, and the app recognizes it and prompts you to sync right away. If connecting a backup from another MacBook, it automatically switches to Migration Mode, freezes false-orphan markings, and offers 1-click folder auto-linking, restore, or machine pairing.
 - **Backs up only what changed**: Only new and modified files are copied over. If an existing backup file has changed on your Mac, the older version is saved with a timestamp instead of being overwritten.
 - **Storage & Reclaimable Space Analytics**: Visual capacity breakdown showing total drive size, free space, active backup footprint, version archives, and reclaimable space consumed by orphaned files.

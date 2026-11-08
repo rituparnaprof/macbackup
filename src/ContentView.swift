@@ -1010,7 +1010,7 @@ struct GlobalStatusFooterView: View {
             Divider().frame(height: 12)
             
             VStack(alignment: .trailing, spacing: 0) {
-                Text("v2.2.0")
+                Text("v2.2.1")
                 Text("Made for my Love - DG").italic()
             }
             .font(.system(size: 9))

@@ -94,7 +94,7 @@ final class MacBackupTests: XCTestCase {
 
     func testHashFileContentDeterminism() throws {
         let file = tempDirectory.appendingPathComponent("hello.txt")
-        let content = "Hello, MacBackup v2.2.0!"
+        let content = "Hello, MacBackup v2.2.1!"
         try content.write(to: file, atomically: true, encoding: .utf8)
 
         let manager = BackupManager()
@@ -121,7 +121,7 @@ final class MacBackupTests: XCTestCase {
 
     func testManifestSaveAndLoad() throws {
         let manifest = BackupManifest(
-            version: "2.2.0",
+            version: "2.2.1",
             friendlyName: "Samsung T7",
             sources: [
                 SourceMapping(folderName: "Documents", relativeHomePath: "Documents", lastKnownPath: "/Users/test/Documents")
@@ -132,7 +132,7 @@ final class MacBackupTests: XCTestCase {
         let loaded = ManifestManager.load(from: tempDirectory)
 
         XCTAssertNotNil(loaded)
-        XCTAssertEqual(loaded?.version, "2.2.0")
+        XCTAssertEqual(loaded?.version, "2.2.1")
         XCTAssertEqual(loaded?.friendlyName, "Samsung T7")
         XCTAssertEqual(loaded?.sources.count, 1)
         XCTAssertEqual(loaded?.sources.first?.folderName, "Documents")
@@ -143,7 +143,7 @@ final class MacBackupTests: XCTestCase {
         // Manifest created with a different machine ID
         let foreignMachine = MachineMetadata(machineId: "FOREIGN_MACHINE_UUID", hostname: "MacBookPro-Other", username: "alex")
         let manifest = BackupManifest(
-            version: "2.2.0",
+            version: "2.2.1",
             friendlyName: "External Drive",
             lastBackupMachine: foreignMachine
         )
@@ -215,15 +215,18 @@ final class MacBackupTests: XCTestCase {
 
     func testDiscoveredBackupStructure() {
         let manifest = BackupManifest(friendlyName: "SanDisk Extreme")
+        let backupFolder = tempDirectory.appendingPathComponent("MacBackup")
         let discovered = DiscoveredBackup(
             volumeURL: tempDirectory,
-            backupFolderURL: tempDirectory.appendingPathComponent("MacBackup"),
+            backupFolderURL: backupFolder,
             manifest: manifest,
             isSameMachine: true,
             volumeName: "ExtremeSSD"
         )
 
-        XCTAssertEqual(discovered.id, tempDirectory.path)
+        XCTAssertEqual(discovered.id, backupFolder.path)
+        XCTAssertEqual(discovered.volumeURL, tempDirectory)
+        XCTAssertEqual(discovered.backupFolderURL, backupFolder)
         XCTAssertEqual(discovered.volumeName, "ExtremeSSD")
         XCTAssertTrue(discovered.isSameMachine)
         XCTAssertEqual(discovered.manifest.friendlyName, "SanDisk Extreme")
