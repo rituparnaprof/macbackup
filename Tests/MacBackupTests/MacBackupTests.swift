@@ -1,0 +1,213 @@
+//
+//  MacBackupTests.swift
+//  MacBackupTests
+//
+//  Copyright (C) 2024-2026 MacBackup Contributors
+//
+//  This program is free software: you can redistribute it and/or modify
+//  it under the terms of the GNU General Public License as published by
+//  the Free Software Foundation, either version 3 of the License, or
+//  (at your option) any later version.
+//
+//  This program is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//  GNU General Public License for more details.
+//
+//  You should have received a copy of the GNU General Public License
+//  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+//
+
+import XCTest
+import Foundation
+@testable import MacBackup
+
+final class MacBackupTests: XCTestCase {
+    private var tempDirectory: URL!
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("MacBackupTests_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true, attributes: nil)
+    }
+
+    override func tearDownWithError() throws {
+        if let dir = tempDirectory, FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.removeItem(at: dir)
+        }
+        try super.tearDownWithError()
+    }
+
+    // MARK: - 1. Path Security & Traversal Tests
+
+    func testPathSecurityRelativeSubpathValid() {
+        let base = URL(fileURLWithPath: "/Users/tester/Documents")
+        let file = URL(fileURLWithPath: "/Users/tester/Documents/Projects/App/main.swift")
+        
+        let relative = PathSecurity.relativeSubpath(of: file, relativeTo: base)
+        XCTAssertEqual(relative, "Projects/App/main.swift")
+    }
+
+    func testPathSecurityDuplicateFolderNames() {
+        // Ensures relativeSubpath does not strip nested folder names with identical names
+        let base = URL(fileURLWithPath: "/Users/tester/Documents/tester")
+        let file = URL(fileURLWithPath: "/Users/tester/Documents/tester/tester/file.txt")
+        
+        let relative = PathSecurity.relativeSubpath(of: file, relativeTo: base)
+        XCTAssertEqual(relative, "tester/file.txt")
+    }
+
+    func testPathSecurityOutsideDirectoryRejected() {
+        let base = URL(fileURLWithPath: "/Users/tester/Documents")
+        let outside = URL(fileURLWithPath: "/Users/tester/Pictures/photo.jpg")
+        
+        let relative = PathSecurity.relativeSubpath(of: outside, relativeTo: base)
+        XCTAssertNil(relative, "Files outside base must return nil")
+    }
+
+    func testPathSecurityIsSubpath() {
+        let parent = URL(fileURLWithPath: "/Volumes/BackupDrive/Backups")
+        let child = URL(fileURLWithPath: "/Volumes/BackupDrive/Backups/Documents/file.pdf")
+        let outside = URL(fileURLWithPath: "/Volumes/BackupDrive/System/file.pdf")
+        let parentSelf = URL(fileURLWithPath: "/Volumes/BackupDrive/Backups")
+        
+        XCTAssertTrue(PathSecurity.isSubpath(of: child, inside: parent))
+        XCTAssertFalse(PathSecurity.isSubpath(of: outside, inside: parent))
+        XCTAssertFalse(PathSecurity.isSubpath(of: parentSelf, inside: parent))
+    }
+
+    // MARK: - 2. Hash Verification & EOF Bug Defense
+
+    func testHashFileEmptyFileTerminatesWithoutHanging() throws {
+        // Verifies the critical EOF infinite loop bug is resolved:
+        // Hashing an empty 0-byte file must terminate immediately.
+        let emptyFile = tempDirectory.appendingPathComponent("empty.txt")
+        try Data().write(to: emptyFile)
+
+        let manager = BackupManager()
+        let hash = manager.hashFile(url: emptyFile)
+        
+        XCTAssertNotNil(hash)
+        // SHA-256 of empty string is e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+        XCTAssertEqual(hash, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+    }
+
+    func testHashFileContentDeterminism() throws {
+        let file = tempDirectory.appendingPathComponent("hello.txt")
+        let content = "Hello, MacBackup v2.1.0!"
+        try content.write(to: file, atomically: true, encoding: .utf8)
+
+        let manager = BackupManager()
+        let hash1 = manager.hashFile(url: file)
+        let hash2 = manager.hashFile(url: file)
+
+        XCTAssertNotNil(hash1)
+        XCTAssertEqual(hash1, hash2, "Hashing identical content must produce deterministic SHA-256")
+    }
+
+    func testHashFileMultiMegabyteChunking() throws {
+        // Verifies 1 MB buffer chunking across a 2.5 MB file
+        let largeFile = tempDirectory.appendingPathComponent("large.bin")
+        let data = Data(repeating: 0xAB, count: Int(2.5 * 1024 * 1024))
+        try data.write(to: largeFile)
+
+        let manager = BackupManager()
+        let hash = manager.hashFile(url: largeFile)
+        XCTAssertNotNil(hash)
+        XCTAssertEqual(hash?.count, 64, "SHA-256 hex string must be 64 characters")
+    }
+
+    // MARK: - 3. Manifest Serialization & Machine Lifecycle
+
+    func testManifestSaveAndLoad() throws {
+        let manifest = BackupManifest(
+            version: "2.1.0",
+            friendlyName: "Samsung T7",
+            sources: [
+                SourceMapping(folderName: "Documents", relativeHomePath: "Documents", lastKnownPath: "/Users/test/Documents")
+            ]
+        )
+
+        try ManifestManager.save(manifest, to: tempDirectory)
+        let loaded = ManifestManager.load(from: tempDirectory)
+
+        XCTAssertNotNil(loaded)
+        XCTAssertEqual(loaded?.version, "2.1.0")
+        XCTAssertEqual(loaded?.friendlyName, "Samsung T7")
+        XCTAssertEqual(loaded?.sources.count, 1)
+        XCTAssertEqual(loaded?.sources.first?.folderName, "Documents")
+        XCTAssertEqual(loaded?.lastBackupMachine.machineId, MachineMetadata.current().machineId)
+    }
+
+    func testManifestMigrationModeDetection() throws {
+        // Manifest created with a different machine ID
+        let foreignMachine = MachineMetadata(machineId: "FOREIGN_MACHINE_UUID", hostname: "MacBookPro-Other", username: "alex")
+        let manifest = BackupManifest(
+            version: "2.1.0",
+            friendlyName: "External Drive",
+            lastBackupMachine: foreignMachine
+        )
+
+        try ManifestManager.save(manifest, to: tempDirectory)
+        let loaded = ManifestManager.load(from: tempDirectory)
+
+        XCTAssertNotNil(loaded)
+        XCTAssertNotEqual(loaded?.lastBackupMachine.machineId, MachineMetadata.current().machineId, "Foreign machine ID should not match local machine")
+    }
+
+    // MARK: - 4. Storage Metrics Arithmetic
+
+    func testStorageMetricsUsedSpace() {
+        var metrics = StorageMetrics()
+        metrics.totalDriveCapacity = 1_000_000_000 // 1 GB
+        metrics.freeDriveSpace = 400_000_000      // 400 MB
+        metrics.orphanedFilesSize = 50_000_000    // 50 MB
+
+        XCTAssertEqual(metrics.usedDriveSpace, 600_000_000)
+        XCTAssertFalse(metrics.reclaimableSpaceFormatted.isEmpty)
+    }
+
+    func testFormattedByteCountExtension() {
+        let oneKB: Int64 = 1024
+        let oneMB: Int64 = 1024 * 1024
+        let oneGB: Int64 = 1024 * 1024 * 1024
+
+        XCTAssertTrue(oneKB.formattedBytes.contains("KB") || oneKB.formattedBytes.contains("kB"))
+        XCTAssertTrue(oneMB.formattedBytes.contains("MB"))
+        XCTAssertTrue(oneGB.formattedBytes.contains("GB"))
+    }
+
+    // MARK: - 5. Conflict Policy & Registration State
+
+    func testConflictPolicyEnum() {
+        XCTAssertEqual(ConflictPolicy.allCases.count, 3)
+        XCTAssertEqual(ConflictPolicy.keepBoth.id, ConflictPolicy.keepBoth.rawValue)
+        XCTAssertEqual(ConflictPolicy.overwrite.id, ConflictPolicy.overwrite.rawValue)
+        XCTAssertEqual(ConflictPolicy.skip.id, ConflictPolicy.skip.rawValue)
+    }
+
+    func testDriveRegistrationStateEquality() {
+        XCTAssertEqual(DriveRegistrationState.pairedThisMac, DriveRegistrationState.pairedThisMac)
+        XCTAssertNotEqual(DriveRegistrationState.pairedThisMac, DriveRegistrationState.pairedOtherMac)
+        XCTAssertNotEqual(DriveRegistrationState.unregistered, DriveRegistrationState.disconnected)
+    }
+
+    // MARK: - 6. File System Node & Hierarchy
+
+    func testFileSystemNodeCreation() {
+        let node = FileSystemNode(
+            url: tempDirectory,
+            name: tempDirectory.lastPathComponent,
+            isDirectory: true,
+            modificationDate: Date(),
+            size: 1024,
+            isOrphaned: false,
+            isVersionedArchive: false
+        )
+
+        XCTAssertEqual(node.id, tempDirectory.path)
+        XCTAssertTrue(node.isDirectory)
+        XCTAssertFalse(node.isOrphaned)
+        XCTAssertFalse(node.isVersionedArchive)
+    }
+}

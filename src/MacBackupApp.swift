@@ -106,11 +106,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         
-        // Listen for drive mount to show window
+        // Listen for drive mount to bring app forward
         NotificationCenter.default.addObserver(forName: Notification.Name("RegisteredDriveMounted"), object: nil, queue: .main) { _ in
-            if let url = URL(string: "macbackup://show") {
-                NSWorkspace.shared.open(url)
-            }
+            NSApp.activate(ignoringOtherApps: true)
         }
     }
 

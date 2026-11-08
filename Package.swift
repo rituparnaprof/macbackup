@@ -36,5 +36,10 @@ let package = Package(
             name: "MacBackup",
             path: "src"
         ),
+        .testTarget(
+            name: "MacBackupTests",
+            dependencies: ["MacBackup"],
+            path: "Tests/MacBackupTests"
+        ),
     ]
 )

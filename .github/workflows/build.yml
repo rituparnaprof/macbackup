@@ -34,6 +34,10 @@ jobs:
         run: |
           swift build -c release --triple arm64-apple-macosx
 
+      - name: Run Unit Tests
+        run: |
+          swift test
+
       - name: Build Application Bundle & DMG Installer (Apple Silicon)
         run: |
           set -e
@@ -97,7 +101,7 @@ jobs:
               <key>CFBundlePackageType</key>
               <string>APPL</string>
               <key>CFBundleShortVersionString</key>
-              <string>2.0.0</string>
+              <string>2.1.0</string>
               <key>LSMinimumSystemVersion</key>
               <string>13.0</string>
               <key>LSUIElement</key>

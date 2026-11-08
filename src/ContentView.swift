@@ -206,11 +206,11 @@ struct SidebarView: View {
                                 ProgressView(value: Double(backupManager.storageMetrics.usedDriveSpace), total: Double(backupManager.storageMetrics.totalDriveCapacity))
                                     .tint(.blue)
                                 HStack {
-                                    Text("\(formatBytes(backupManager.storageMetrics.freeDriveSpace)) free")
+                                    Text("\(backupManager.storageMetrics.freeDriveSpace.formattedBytes) free")
                                         .font(.system(size: 10))
                                         .foregroundColor(.secondary)
                                     Spacer()
-                                    Text("\(formatBytes(backupManager.storageMetrics.totalDriveCapacity))")
+                                    Text("\(backupManager.storageMetrics.totalDriveCapacity.formattedBytes)")
                                         .font(.system(size: 10))
                                         .foregroundColor(.secondary)
                                 }
@@ -339,13 +339,6 @@ struct SidebarView: View {
         case .unregistered: return "Drive Connected (Unregistered)"
         case .disconnected: return "Drive Disconnected"
         }
-    }
-    
-    private func formatBytes(_ bytes: Int64) -> String {
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useAll]
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: bytes)
     }
 }
 
@@ -480,7 +473,7 @@ struct BackupDetailView: View {
                             
                             Spacer(minLength: 20)
                             if !node.isDirectory {
-                                Text(formatBytes(node.size))
+                                Text(node.size.formattedBytes)
                                     .foregroundColor(.secondary)
                                     .font(.caption)
                             }
@@ -522,7 +515,7 @@ struct BackupDetailView: View {
                 Divider().frame(height: 12)
                 
                 VStack(alignment: .trailing, spacing: 0) {
-                    Text("v2.0")
+                    Text("v2.1.0")
                     Text("Made for my Love - DG").italic()
                 }
                 .font(.system(size: 9))
@@ -543,13 +536,6 @@ struct BackupDetailView: View {
         }
         return count
     }
-    
-    private func formatBytes(_ bytes: Int64) -> String {
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useAll]
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: bytes)
-    }
 }
 
 // MARK: - Restore Detail View
@@ -558,7 +544,6 @@ struct RestoreDetailView: View {
     @EnvironmentObject var backupManager: BackupManager
     @State private var restoreDestination: URL = FileManager.default.homeDirectoryForCurrentUser
     @State private var conflictPolicy: ConflictPolicy = .keepBoth
-    @State private var showingCustomDestPicker = false
     @State private var showingFullRestoreConfirm = false
     @State private var showingSelectiveRestoreConfirm = false
     @State private var showingInsufficientSpaceAlert = false
@@ -579,7 +564,7 @@ struct RestoreDetailView: View {
                         .font(.headline)
                     Spacer()
                     if backupManager.storageMetrics.macSSDFreeSpace > 0 {
-                        Text("Mac SSD Free: \(formatBytes(backupManager.storageMetrics.macSSDFreeSpace))")
+                        Text("Mac SSD Free: \(backupManager.storageMetrics.macSSDFreeSpace.formattedBytes)")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -748,13 +733,6 @@ struct RestoreDetailView: View {
             restoreDestination = url
         }
     }
-    
-    private func formatBytes(_ bytes: Int64) -> String {
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useAll]
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: bytes)
-    }
 }
 
 // MARK: - Orphan Cleanup View
@@ -818,7 +796,7 @@ struct OrphanCleanupView: View {
                             .font(.caption2)
                             .foregroundColor(.secondary)
                             .textCase(.uppercase)
-                        Text("\(formatBytes(backupManager.storageMetrics.archivedVersionsSize)) (\(backupManager.storageMetrics.versionCount) archives)")
+                        Text("\(backupManager.storageMetrics.archivedVersionsSize.formattedBytes) (\(backupManager.storageMetrics.versionCount) archives)")
                             .font(.headline)
                             .foregroundColor(.blue)
                     }
@@ -900,7 +878,7 @@ struct OrphanCleanupView: View {
                         
                         Spacer()
                         
-                        Text(formatBytes(node.size))
+                        Text(node.size.formattedBytes)
                             .font(.caption)
                             .foregroundColor(.secondary)
                         
@@ -932,13 +910,6 @@ struct OrphanCleanupView: View {
         } message: {
             Text("These items will be permanently deleted from the external drive. This action cannot be undone.")
         }
-    }
-    
-    private func formatBytes(_ bytes: Int64) -> String {
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useAll]
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: bytes)
     }
 }
 
@@ -975,8 +946,7 @@ struct FilePreviewView: View {
                 }
                 
                 if !node.isDirectory {
-                    let formatter = ByteCountFormatter()
-                    Text("Size: \(formatter.string(fromByteCount: node.size))")
+                    Text("Size: \(node.size.formattedBytes)")
                         .font(.caption)
                 }
                 

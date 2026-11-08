@@ -24,7 +24,37 @@ import AppKit
 import SwiftUI
 import CryptoKit
 
-public struct FileSystemNode: Identifiable {
+public enum PathSecurity: Sendable {
+    public static func relativeSubpath(of fileURL: URL, relativeTo baseURL: URL) -> String? {
+        let base = baseURL.standardizedFileURL.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let file = fileURL.standardizedFileURL.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let prefix = base + "/"
+        guard file.hasPrefix(prefix) else { return nil }
+        let relative = String(file.dropFirst(prefix.count))
+        return relative.isEmpty ? nil : relative
+    }
+
+    public static func isSubpath(of childURL: URL, inside parentURL: URL) -> Bool {
+        let parent = parentURL.standardizedFileURL.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let child = childURL.standardizedFileURL.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return child.hasPrefix(parent + "/")
+    }
+}
+
+extension Int64 {
+    private static let sharedByteFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useAll]
+        formatter.countStyle = .file
+        return formatter
+    }()
+
+    public var formattedBytes: String {
+        Self.sharedByteFormatter.string(fromByteCount: self)
+    }
+}
+
+public struct FileSystemNode: Identifiable, Sendable {
     public var id: String { url.path }
     public let url: URL
     public let name: String
@@ -56,14 +86,14 @@ public struct FileSystemNode: Identifiable {
     }
 }
 
-public enum DriveRegistrationState: Equatable {
+public enum DriveRegistrationState: Equatable, Sendable {
     case disconnected
     case unregistered
     case pairedThisMac
     case pairedOtherMac
 }
 
-public enum ConflictPolicy: String, CaseIterable, Identifiable {
+public enum ConflictPolicy: String, CaseIterable, Identifiable, Sendable {
     case keepBoth = "Keep Both (Append (Restored))"
     case overwrite = "Overwrite Existing"
     case skip = "Skip If Exists"
@@ -71,7 +101,7 @@ public enum ConflictPolicy: String, CaseIterable, Identifiable {
     public var id: String { rawValue }
 }
 
-public struct StorageMetrics {
+public struct StorageMetrics: Sendable {
     public var totalDriveCapacity: Int64 = 0
     public var freeDriveSpace: Int64 = 0
     public var activeBackupSize: Int64 = 0
@@ -87,10 +117,7 @@ public struct StorageMetrics {
     }
 
     public var reclaimableSpaceFormatted: String {
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useAll]
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: orphanedFilesSize)
+        orphanedFilesSize.formattedBytes
     }
 }
 
@@ -99,6 +126,11 @@ public class BackupManager: ObservableObject {
     @Published public var targetFolder: URL?
     @Published public var targetNodes: [FileSystemNode] = []
     
+    // Fast O(1) Lookup & Caches
+    @Published public var nodeLookup: [String: FileSystemNode] = [:]
+    @Published public var allOrphans: [FileSystemNode] = []
+    @Published public var allVersionedArchives: [FileSystemNode] = []
+
     // Backup State
     @Published public var isBackingUp = false
     @Published public var backupStatus = ""
@@ -131,6 +163,7 @@ public class BackupManager: ObservableObject {
     @Published public var estimatedTimeRemainingFormatted: String = ""
     @Published public var totalBytesTransferred: Int64 = 0
     @Published public var totalBytesToTransfer: Int64 = 0
+    @Published public var isCancelRequested = false
 
     // Stored Preferences
     @AppStorage("registeredDriveUUID") public var registeredDriveUUID: String = ""
@@ -140,8 +173,11 @@ public class BackupManager: ObservableObject {
 
     private let fileManager = FileManager.default
     private var cancellables = Set<AnyCancellable>()
-    private var activityToken: NSObjectProtocol?
-    @Published public var isCancelRequested = false
+
+    // Thread-safe pre-compiled archive regex
+    private static let archiveRegex: NSRegularExpression = {
+        (try? NSRegularExpression(pattern: "(_|\\.v)\\d{8}_\\d{6}(\\.[^.]+)?$")) ?? (try! NSRegularExpression(pattern: "_\\d{8}_\\d{6}"))
+    }()
 
     public init() {
         if savedLastBackupDate > 0 {
@@ -149,7 +185,14 @@ public class BackupManager: ObservableObject {
         }
         
         if !savedSourceFolderPaths.isEmpty {
-            let paths = savedSourceFolderPaths.components(separatedBy: "|")
+            let paths: [String]
+            if savedSourceFolderPaths.starts(with: "["),
+               let data = savedSourceFolderPaths.data(using: .utf8),
+               let decoded = try? JSONDecoder().decode([String].self, from: data) {
+                paths = decoded
+            } else {
+                paths = savedSourceFolderPaths.components(separatedBy: "|")
+            }
             sourceFolders = paths.compactMap { path in
                 let url = URL(fileURLWithPath: path)
                 return fileManager.fileExists(atPath: url.path) ? url : nil
@@ -251,7 +294,6 @@ public class BackupManager: ObservableObject {
                 
                 NotificationCenter.default.post(name: Notification.Name("RegisteredDriveMounted"), object: nil)
                 
-                // Bring app to foreground
                 NSApp.activate(ignoringOtherApps: true)
                 if !self.isMigrationMode {
                     self.showingBackupPrompt = true
@@ -266,6 +308,9 @@ public class BackupManager: ObservableObject {
             if !self.isDriveConnected {
                 self.targetFolder = nil
                 self.targetNodes = []
+                self.nodeLookup.removeAll()
+                self.allOrphans.removeAll()
+                self.allVersionedArchives.removeAll()
                 self.currentManifest = nil
                 self.driveState = .disconnected
                 self.isMigrationMode = false
@@ -285,7 +330,10 @@ public class BackupManager: ObservableObject {
         
         if panel.runModal() == .OK {
             sourceFolders = panel.urls
-            savedSourceFolderPaths = panel.urls.map { $0.path }.joined(separator: "|")
+            if let data = try? JSONEncoder().encode(panel.urls.map { $0.path }),
+               let json = String(data: data, encoding: .utf8) {
+                savedSourceFolderPaths = json
+            }
             refreshTargetFiles()
             calculateSyncStatus()
             calculateStorageMetrics()
@@ -307,7 +355,6 @@ public class BackupManager: ObservableObject {
                 registeredDriveUUID = uuid
             }
             
-            // Check for existing manifest or initialize new one
             if let manifest = ManifestManager.load(from: url) {
                 currentManifest = manifest
                 let localMachine = MachineMetadata.current()
@@ -339,6 +386,9 @@ public class BackupManager: ObservableObject {
         savedTargetFolderPath = ""
         targetFolder = nil
         targetNodes = []
+        nodeLookup.removeAll()
+        allOrphans.removeAll()
+        allVersionedArchives.removeAll()
         currentManifest = nil
         isDriveConnected = false
         driveState = .disconnected
@@ -389,7 +439,10 @@ public class BackupManager: ObservableObject {
         
         if !linkedURLs.isEmpty {
             sourceFolders = linkedURLs
-            savedSourceFolderPaths = linkedURLs.map { $0.path }.joined(separator: "|")
+            if let data = try? JSONEncoder().encode(linkedURLs.map { $0.path }),
+               let json = String(data: data, encoding: .utf8) {
+                savedSourceFolderPaths = json
+            }
             adoptBackupForThisMac()
             backupStatus = "Auto-linked \(linkedURLs.count) standard folder(s) on this Mac!"
         } else {
@@ -423,19 +476,16 @@ public class BackupManager: ObservableObject {
             
             var metrics = StorageMetrics()
             
-            // 1. External drive capacity
             if let volumeValues = try? target.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityKey]) {
                 metrics.totalDriveCapacity = Int64(volumeValues.volumeTotalCapacity ?? 0)
                 metrics.freeDriveSpace = Int64(volumeValues.volumeAvailableCapacity ?? 0)
             }
             
-            // 2. Mac SSD free space
             let homeURL = self.fileManager.homeDirectoryForCurrentUser
             if let homeValues = try? homeURL.resourceValues(forKeys: [.volumeAvailableCapacityKey]) {
                 metrics.macSSDFreeSpace = Int64(homeValues.volumeAvailableCapacity ?? 0)
             }
             
-            // 3. Target file tree breakdown
             let leaves = self.flattenNodes(self.targetNodes).filter { !$0.isDirectory }
             for leaf in leaves {
                 if leaf.isOrphaned {
@@ -458,7 +508,7 @@ public class BackupManager: ObservableObject {
 
     // MARK: - SHA-256 Hashing & Safe Copying
 
-    private func hashFile(url: URL) -> String? {
+    public func hashFile(url: URL) -> String? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         
@@ -466,7 +516,7 @@ public class BackupManager: ObservableObject {
         let bufferSize = 1024 * 1024 // 1MB chunks
         
         while autoreleasepool(invoking: {
-            guard let data = try? handle.read(upToCount: bufferSize) else { return false }
+            guard let data = try? handle.read(upToCount: bufferSize), !data.isEmpty else { return false }
             hasher.update(data: data)
             return true
         }) {}
@@ -482,7 +532,7 @@ public class BackupManager: ObservableObject {
             } catch {
                 attempts += 1
                 if attempts >= maxRetries { throw error }
-                Thread.sleep(forTimeInterval: 1.0)
+                Thread.sleep(forTimeInterval: 0.5)
             }
         }
     }
@@ -491,7 +541,7 @@ public class BackupManager: ObservableObject {
         let tmpTarget = target.appendingPathExtension("tmp")
         
         if fileManager.fileExists(atPath: tmpTarget.path) {
-            try fileManager.removeItem(at: tmpTarget)
+            try? fileManager.removeItem(at: tmpTarget)
         }
         
         // 1. Copy to tmp
@@ -520,17 +570,30 @@ public class BackupManager: ObservableObject {
             throw NSError(domain: "BackupManager", code: 2, userInfo: [NSLocalizedDescriptionKey: "Checksum mismatch: Data corruption detected."])
         }
         
-        // 3. Atomic Rename
+        // 3. Move tmp to final target (atomic where possible)
         if fileManager.fileExists(atPath: target.path) {
-            try fileManager.removeItem(at: target)
+            do {
+                _ = try fileManager.replaceItemAt(target, withItemAt: tmpTarget, backupItemName: nil, options: .usingNewMetadataOnly)
+            } catch {
+                try? fileManager.removeItem(at: target)
+                try fileManager.moveItem(at: tmpTarget, to: target)
+            }
+        } else {
+            try fileManager.moveItem(at: tmpTarget, to: target)
         }
-        try fileManager.moveItem(at: tmpTarget, to: target)
+
+        // 4. Synchronize source modification timestamp to prevent FAT32 jitter
+        if let sourceAttr = try? fileManager.attributesOfItem(atPath: source.path),
+           let sourceDate = sourceAttr[.modificationDate] as? Date {
+            try? fileManager.setAttributes([.modificationDate: sourceDate], ofItemAtPath: target.path)
+        }
     }
 
     // MARK: - Backup Execution with Metrics & Cancellation
 
     public func performBackup() {
         guard !sourceFolders.isEmpty, let target = targetFolder else { return }
+        guard !isBackingUp && !isRestoring else { return }
         
         isBackingUp = true
         isCancelRequested = false
@@ -542,52 +605,57 @@ public class BackupManager: ObservableObject {
         transferRateFormatted = ""
         estimatedTimeRemainingFormatted = ""
         
-        activityToken = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "Running Backup")
+        let token = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "Running Backup")
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             
             defer {
-                if let token = self.activityToken {
-                    ProcessInfo.processInfo.endActivity(token)
-                    self.activityToken = nil
-                }
+                ProcessInfo.processInfo.endActivity(token)
             }
             
             do {
-                // 1. Pre-scan items and compute total bytes to copy
                 var itemsToCopy: [(source: URL, target: URL, isModification: Bool, oldTargetDate: Date?)] = []
                 var bytesToTransfer: Int64 = 0
                 
                 for source in self.sourceFolders {
-                    let resourceKeys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey]
-                    let enumerator = self.fileManager.enumerator(at: source, includingPropertiesForKeys: resourceKeys, options: [.skipsHiddenFiles])
+                    let sourceParent = source.deletingLastPathComponent()
+                    let resourceKeys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey, .isSymbolicLinkKey]
+                    let enumerator = self.fileManager.enumerator(at: source, includingPropertiesForKeys: resourceKeys, options: [.skipsHiddenFiles, .skipsPackageDescendants])
                     
                     while let fileURL = enumerator?.nextObject() as? URL {
+                        let resValues = try? fileURL.resourceValues(forKeys: Set(resourceKeys))
+                        if resValues?.isSymbolicLink == true {
+                            continue
+                        }
+                        
                         var isDir: ObjCBool = false
                         if self.fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDir), isDir.boolValue {
                             continue
                         }
                         
-                        let sourceParentPath = source.deletingLastPathComponent().path + "/"
-                        let relativePath = fileURL.path.replacingOccurrences(of: sourceParentPath, with: "")
+                        guard let relativePath = PathSecurity.relativeSubpath(of: fileURL, relativeTo: sourceParent) else {
+                            continue
+                        }
                         let targetURL = target.appendingPathComponent(relativePath)
                         
                         let sourceAttr = try? self.fileManager.attributesOfItem(atPath: fileURL.path)
-                        let fileSize = (sourceAttr?[.size] as? Int64) ?? 0
+                        let sourceSize = (sourceAttr?[.size] as? Int64) ?? 0
                         
                         if self.fileManager.fileExists(atPath: targetURL.path) {
                             let targetAttr = try? self.fileManager.attributesOfItem(atPath: targetURL.path)
+                            let targetSize = (targetAttr?[.size] as? Int64) ?? 0
                             let sourceDate = sourceAttr?[.modificationDate] as? Date ?? Date()
                             let targetDate = targetAttr?[.modificationDate] as? Date ?? Date.distantPast
                             
-                            if sourceDate.timeIntervalSince(targetDate) > 1.0 {
+                            // 2.0 second tolerance window for cross-filesystem accuracy
+                            if (sourceSize != targetSize) || (sourceDate.timeIntervalSince(targetDate) > 2.0) {
                                 itemsToCopy.append((source: fileURL, target: targetURL, isModification: true, oldTargetDate: targetDate))
-                                bytesToTransfer += fileSize
+                                bytesToTransfer += sourceSize
                             }
                         } else {
                             itemsToCopy.append((source: fileURL, target: targetURL, isModification: false, oldTargetDate: nil))
-                            bytesToTransfer += fileSize
+                            bytesToTransfer += sourceSize
                         }
                     }
                 }
@@ -598,7 +666,7 @@ public class BackupManager: ObservableObject {
                 
                 let startTime = Date()
                 
-                // 2. Perform safe copies
+                // 2. Perform safe copies with per-file error isolation
                 for item in itemsToCopy {
                     if self.isCancelRequested {
                         throw NSError(domain: "BackupManager", code: 99, userInfo: [NSLocalizedDescriptionKey: "Backup cancelled by user."])
@@ -609,33 +677,44 @@ public class BackupManager: ObservableObject {
                         try? self.fileManager.createDirectory(at: targetDir, withIntermediateDirectories: true, attributes: nil)
                     }
                     
-                    if item.isModification, let targetDate = item.oldTargetDate {
-                        let ext = item.target.pathExtension
-                        let nameWithoutExt = item.target.deletingPathExtension().lastPathComponent
-                        let formatter = DateFormatter()
-                        formatter.dateFormat = "yyyyMMdd_HHmmss"
-                        let timestamp = formatter.string(from: targetDate)
-                        let oldFileName = "\(nameWithoutExt)_\(timestamp).\(ext)"
-                        let oldTargetURL = item.target.deletingLastPathComponent().appendingPathComponent(oldFileName)
+                    do {
+                        if item.isModification, let targetDate = item.oldTargetDate {
+                            let ext = item.target.pathExtension
+                            let nameWithoutExt = item.target.deletingPathExtension().lastPathComponent
+                            let formatter = DateFormatter()
+                            formatter.dateFormat = "yyyyMMdd_HHmmss"
+                            let timestamp = formatter.string(from: targetDate)
+                            let baseArchiveName = ext.isEmpty ? "\(nameWithoutExt)_\(timestamp)" : "\(nameWithoutExt)_\(timestamp).\(ext)"
+                            var oldTargetURL = item.target.deletingLastPathComponent().appendingPathComponent(baseArchiveName)
+                            
+                            var seq = 1
+                            while self.fileManager.fileExists(atPath: oldTargetURL.path) {
+                                let seqName = ext.isEmpty ? "\(nameWithoutExt)_\(timestamp)_\(seq)" : "\(nameWithoutExt)_\(timestamp)_\(seq).\(ext)"
+                                oldTargetURL = item.target.deletingLastPathComponent().appendingPathComponent(seqName)
+                                seq += 1
+                            }
+                            
+                            try self.performWithRetry {
+                                try self.fileManager.moveItem(at: item.target, to: oldTargetURL)
+                            }
+                            DispatchQueue.main.async { self.modifiedFilesUpdated += 1 }
+                        } else if !item.isModification {
+                            DispatchQueue.main.async { self.newFilesAdded += 1 }
+                        }
                         
-                        if self.fileManager.fileExists(atPath: oldTargetURL.path) {
-                            try? self.fileManager.removeItem(at: oldTargetURL)
+                        DispatchQueue.main.async {
+                            self.currentFileName = item.target.lastPathComponent
+                            self.backupStatus = "Copying \(item.target.lastPathComponent)..."
                         }
-                        try self.performWithRetry {
-                            try self.fileManager.moveItem(at: item.target, to: oldTargetURL)
+                        
+                        try self.safeCopyAndVerify(source: item.source, target: item.target) { bytesCopied in
+                            self.updateTransferMetrics(bytesCopied: bytesCopied, startTime: startTime)
                         }
-                        DispatchQueue.main.async { self.modifiedFilesUpdated += 1 }
-                    } else if !item.isModification {
-                        DispatchQueue.main.async { self.newFilesAdded += 1 }
-                    }
-                    
-                    DispatchQueue.main.async {
-                        self.currentFileName = item.target.lastPathComponent
-                        self.backupStatus = "Copying \(item.target.lastPathComponent)..."
-                    }
-                    
-                    try self.safeCopyAndVerify(source: item.source, target: item.target) { bytesCopied in
-                        self.updateTransferMetrics(bytesCopied: bytesCopied, startTime: startTime)
+                    } catch {
+                        if self.isCancelRequested { throw error }
+                        DispatchQueue.main.async {
+                            self.backupStatus = "Skipped unreadable item: \(item.source.lastPathComponent)"
+                        }
                     }
                 }
                 
@@ -694,10 +773,12 @@ public class BackupManager: ObservableObject {
                 let name = target.deletingPathExtension().lastPathComponent
                 let dir = target.deletingLastPathComponent()
                 var counter = 1
-                var candidate = dir.appendingPathComponent("\(name) (Restored).\(ext)")
+                let baseRestoredName = ext.isEmpty ? "\(name) (Restored)" : "\(name) (Restored).\(ext)"
+                var candidate = dir.appendingPathComponent(baseRestoredName)
                 while fileManager.fileExists(atPath: candidate.path) {
                     counter += 1
-                    candidate = dir.appendingPathComponent("\(name) (Restored \(counter)).\(ext)")
+                    let countedName = ext.isEmpty ? "\(name) (Restored \(counter))" : "\(name) (Restored \(counter)).\(ext)"
+                    candidate = dir.appendingPathComponent(countedName)
                 }
                 finalTarget = candidate
             }
@@ -710,7 +791,7 @@ public class BackupManager: ObservableObject {
 
         let tmpTarget = finalTarget.appendingPathExtension("tmp")
         if fileManager.fileExists(atPath: tmpTarget.path) {
-            try fileManager.removeItem(at: tmpTarget)
+            try? fileManager.removeItem(at: tmpTarget)
         }
 
         // 1. Copy to tmp
@@ -738,11 +819,23 @@ public class BackupManager: ObservableObject {
             throw NSError(domain: "RestoreEngine", code: 2, userInfo: [NSLocalizedDescriptionKey: "Checksum mismatch during restore: Data corruption detected."])
         }
 
-        // 3. Move tmp to final target
+        // 3. Move tmp to final target using atomic replace where supported
         if fileManager.fileExists(atPath: finalTarget.path) {
-            try fileManager.removeItem(at: finalTarget)
+            do {
+                _ = try fileManager.replaceItemAt(finalTarget, withItemAt: tmpTarget, backupItemName: nil, options: .usingNewMetadataOnly)
+            } catch {
+                try? fileManager.removeItem(at: finalTarget)
+                try fileManager.moveItem(at: tmpTarget, to: finalTarget)
+            }
+        } else {
+            try fileManager.moveItem(at: tmpTarget, to: finalTarget)
         }
-        try fileManager.moveItem(at: tmpTarget, to: finalTarget)
+
+        // 4. Mirror source timestamp
+        if let sourceAttr = try? fileManager.attributesOfItem(atPath: source.path),
+           let sourceDate = sourceAttr[.modificationDate] as? Date {
+            try? fileManager.setAttributes([.modificationDate: sourceDate], ofItemAtPath: finalTarget.path)
+        }
     }
 
     private func restoreNodeRecursively(_ node: FileSystemNode, relativeToBase: URL, destinationBase: URL, conflictPolicy: ConflictPolicy, startTime: Date) throws {
@@ -757,7 +850,9 @@ public class BackupManager: ObservableObject {
                 }
             }
         } else {
-            let relativePath = node.url.path.replacingOccurrences(of: relativeToBase.path + "/", with: "")
+            guard let relativePath = PathSecurity.relativeSubpath(of: node.url, relativeTo: relativeToBase) else {
+                return
+            }
             let destURL = destinationBase.appendingPathComponent(relativePath)
             
             DispatchQueue.main.async {
@@ -779,16 +874,14 @@ public class BackupManager: ObservableObject {
     }
 
     public func canRestore(bytesNeeded: Int64) -> (allowed: Bool, neededFormatted: String, freeFormatted: String) {
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useAll]
-        formatter.countStyle = .file
         let free = storageMetrics.macSSDFreeSpace
         let allowed = bytesNeeded <= free
-        return (allowed, formatter.string(fromByteCount: bytesNeeded), formatter.string(fromByteCount: free))
+        return (allowed, bytesNeeded.formattedBytes, free.formattedBytes)
     }
 
     public func performFullRestore(to destinationBaseURL: URL, conflictPolicy: ConflictPolicy = .keepBoth) {
         guard let target = targetFolder else { return }
+        guard !isRestoring && !isBackingUp else { return }
         
         isRestoring = true
         isCancelRequested = false
@@ -803,16 +896,13 @@ public class BackupManager: ObservableObject {
         let totalBytes = flattenNodes(validNodes).filter { !$0.isDirectory }.reduce(0) { $0 + $1.size }
         totalBytesToTransfer = totalBytes
         
-        activityToken = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "Running Restore")
+        let token = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "Running Restore")
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             
             defer {
-                if let token = self.activityToken {
-                    ProcessInfo.processInfo.endActivity(token)
-                    self.activityToken = nil
-                }
+                ProcessInfo.processInfo.endActivity(token)
             }
             
             let startTime = Date()
@@ -844,6 +934,7 @@ public class BackupManager: ObservableObject {
 
     public func performSelectiveRestore(nodes: [FileSystemNode], destinationURL: URL, conflictPolicy: ConflictPolicy = .keepBoth) {
         guard let target = targetFolder else { return }
+        guard !isRestoring && !isBackingUp else { return }
         
         isRestoring = true
         isCancelRequested = false
@@ -857,16 +948,13 @@ public class BackupManager: ObservableObject {
         let totalBytes = flattenNodes(nodes).filter { !$0.isDirectory }.reduce(0) { $0 + $1.size }
         totalBytesToTransfer = totalBytes
         
-        activityToken = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "Running Selective Restore")
+        let token = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "Running Selective Restore")
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             
             defer {
-                if let token = self.activityToken {
-                    ProcessInfo.processInfo.endActivity(token)
-                    self.activityToken = nil
-                }
+                ProcessInfo.processInfo.endActivity(token)
             }
             
             let startTime = Date()
@@ -925,10 +1013,7 @@ public class BackupManager: ObservableObject {
             let elapsed = Date().timeIntervalSince(startTime)
             if elapsed > 0.5 {
                 let bytesPerSec = Double(self.totalBytesTransferred) / elapsed
-                let formatter = ByteCountFormatter()
-                formatter.allowedUnits = [.useAll]
-                formatter.countStyle = .file
-                self.transferRateFormatted = "\(formatter.string(fromByteCount: Int64(bytesPerSec)))/s"
+                self.transferRateFormatted = "\(Int64(bytesPerSec).formattedBytes)/s"
                 
                 let remainingBytes = max(0, self.totalBytesToTransfer - self.totalBytesTransferred)
                 if bytesPerSec > 0 {
@@ -963,14 +1048,25 @@ public class BackupManager: ObservableObject {
             guard let self = self else { return }
             let nodes = self.buildTree(for: target, targetRoot: target)
             
-            // Check orphan safety guard
-            let allLeaves = self.flattenNodes(nodes).filter { !$0.isDirectory }
+            // Build indexed dictionary and cache lists
+            let allFlat = self.flattenNodes(nodes)
+            var lookup: [String: FileSystemNode] = [:]
+            lookup.reserveCapacity(allFlat.count)
+            for n in allFlat {
+                lookup[n.id] = n
+            }
+            
+            let allLeaves = allFlat.filter { !$0.isDirectory }
             let orphanLeaves = allLeaves.filter { $0.isOrphaned }
+            let versionArchives = allLeaves.filter { $0.isVersionedArchive }
             let orphanRatio = allLeaves.isEmpty ? 0 : Double(orphanLeaves.count) / Double(allLeaves.count)
             let isLocked = self.isMigrationMode || self.sourceFolders.isEmpty || (orphanRatio > 0.5 && allLeaves.count > 10)
             
             DispatchQueue.main.async {
                 self.targetNodes = nodes
+                self.nodeLookup = lookup
+                self.allOrphans = orphanLeaves
+                self.allVersionedArchives = versionArchives
                 self.orphanSafetyLocked = isLocked
                 self.calculateStorageMetrics()
             }
@@ -979,7 +1075,7 @@ public class BackupManager: ObservableObject {
     
     private func buildTree(for url: URL, targetRoot: URL) -> [FileSystemNode] {
         var nodes: [FileSystemNode] = []
-        let keys: [URLResourceKey] = [.isDirectoryKey, .contentModificationDateKey, .fileSizeKey]
+        let keys: [URLResourceKey] = [.isDirectoryKey, .contentModificationDateKey, .fileSizeKey, .isSymbolicLinkKey]
         
         guard let contents = try? fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]) else {
             return nodes
@@ -991,21 +1087,27 @@ public class BackupManager: ObservableObject {
             }
             
             let attr = try? itemURL.resourceValues(forKeys: Set(keys))
+            if attr?.isSymbolicLink == true {
+                continue
+            }
+            
             let isDir = attr?.isDirectory ?? false
             let modDate = attr?.contentModificationDate ?? Date()
             let size = Int64(attr?.fileSize ?? 0)
             
-            let isVersioned = itemURL.lastPathComponent.range(of: "_\\d{8}_\\d{6}\\.", options: .regularExpression) != nil
+            let isVersioned = Self.archiveRegex.firstMatch(in: itemURL.lastPathComponent, options: [], range: NSRange(location: 0, length: itemURL.lastPathComponent.utf16.count)) != nil
             
-            let relativePath = itemURL.path.replacingOccurrences(of: targetRoot.path + "/", with: "")
-            let baseRelativePath = relativePath.replacingOccurrences(of: "_\\d{8}_\\d{6}", with: "", options: .regularExpression)
+            guard let relativePath = PathSecurity.relativeSubpath(of: itemURL, relativeTo: targetRoot) else {
+                continue
+            }
+            let baseRelativePath = relativePath.replacingOccurrences(of: "(_|\\.v)\\d{8}_\\d{6}(\\.[^.]+)?$", with: "", options: .regularExpression)
             
             var foundInSource = false
             if !isMigrationMode && !sourceFolders.isEmpty {
                 for source in self.sourceFolders {
-                    let sourceParentPath = source.deletingLastPathComponent().path + "/"
-                    let expectedSourcePath = sourceParentPath + baseRelativePath
-                    if self.fileManager.fileExists(atPath: expectedSourcePath) {
+                    let sourceParent = source.deletingLastPathComponent()
+                    let expectedSourceURL = sourceParent.appendingPathComponent(baseRelativePath)
+                    if self.fileManager.fileExists(atPath: expectedSourceURL.path) {
                         foundInSource = true
                         break
                     }
@@ -1044,16 +1146,11 @@ public class BackupManager: ObservableObject {
         }
         return result
     }
-
-    public var allOrphans: [FileSystemNode] {
-        flattenNodes(targetNodes).filter { $0.isOrphaned && !$0.isDirectory }
-    }
-
-    public var allVersionedArchives: [FileSystemNode] {
-        flattenNodes(targetNodes).filter { $0.isVersionedArchive && !$0.isDirectory }
-    }
     
     public func findNode(by id: String, in nodes: [FileSystemNode]? = nil) -> FileSystemNode? {
+        if nodes == nil, let fastFound = nodeLookup[id] {
+            return fastFound
+        }
         let searchNodes = nodes ?? targetNodes
         for node in searchNodes {
             if node.id == id { return node }
@@ -1069,6 +1166,10 @@ public class BackupManager: ObservableObject {
             backupStatus = "Deletion blocked: Orphan safety lock is active."
             return
         }
+        guard let target = targetFolder, PathSecurity.isSubpath(of: node.url, inside: target) else {
+            backupStatus = "Security Guard: Deletion outside backup drive rejected."
+            return
+        }
         do {
             try fileManager.removeItem(at: node.url)
             refreshTargetFiles()
@@ -1082,7 +1183,9 @@ public class BackupManager: ObservableObject {
             backupStatus = "Bulk deletion blocked: Orphan safety lock is active."
             return
         }
-        let nodesToDelete = checkedNodes.compactMap { findNode(by: $0) }
+        guard let target = targetFolder else { return }
+        let nodesToDelete = checkedNodes.compactMap { nodeLookup[$0] }
+            .filter { PathSecurity.isSubpath(of: $0.url, inside: target) }
         for node in nodesToDelete {
             try? fileManager.removeItem(at: node.url)
         }
@@ -1091,6 +1194,10 @@ public class BackupManager: ObservableObject {
     }
 
     public func recoverOrphan(node: FileSystemNode, to destinationURL: URL?) {
+        guard let target = targetFolder, PathSecurity.isSubpath(of: node.url, inside: target) else {
+            backupStatus = "Security Guard: Source file is outside backup drive."
+            return
+        }
         let destDir = destinationURL ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Restored_Orphans")
         try? fileManager.createDirectory(at: destDir, withIntermediateDirectories: true, attributes: nil)
         let targetFile = destDir.appendingPathComponent(node.name)
@@ -1099,8 +1206,10 @@ public class BackupManager: ObservableObject {
     }
 
     public func recoverSelectedOrphans(to destinationURL: URL?) {
+        guard let target = targetFolder else { return }
         let destDir = destinationURL ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Restored_Orphans")
-        let orphansToRecover = checkedNodes.compactMap { findNode(by: $0) }.filter { $0.isOrphaned }
+        let orphansToRecover = checkedNodes.compactMap { nodeLookup[$0] }
+            .filter { $0.isOrphaned && PathSecurity.isSubpath(of: $0.url, inside: target) }
         for node in orphansToRecover {
             recoverOrphan(node: node, to: destDir)
         }
@@ -1120,10 +1229,16 @@ public class BackupManager: ObservableObject {
             var outOfSyncFiles = 0
             
             for source in self.sourceFolders {
-                let keys: [URLResourceKey] = [.contentModificationDateKey]
-                let enumerator = self.fileManager.enumerator(at: source, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])
+                let sourceParent = source.deletingLastPathComponent()
+                let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey, .isSymbolicLinkKey]
+                let enumerator = self.fileManager.enumerator(at: source, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles, .skipsPackageDescendants])
                 
                 while let fileURL = enumerator?.nextObject() as? URL {
+                    let resValues = try? fileURL.resourceValues(forKeys: Set(keys))
+                    if resValues?.isSymbolicLink == true {
+                        continue
+                    }
+                    
                     var isDir: ObjCBool = false
                     if self.fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDir), isDir.boolValue {
                         continue
@@ -1131,8 +1246,9 @@ public class BackupManager: ObservableObject {
                     
                     totalFiles += 1
                     
-                    let sourceParentPath = source.deletingLastPathComponent().path + "/"
-                    let relativePath = fileURL.path.replacingOccurrences(of: sourceParentPath, with: "")
+                    guard let relativePath = PathSecurity.relativeSubpath(of: fileURL, relativeTo: sourceParent) else {
+                        continue
+                    }
                     let targetURL = target.appendingPathComponent(relativePath)
                     
                     if !self.fileManager.fileExists(atPath: targetURL.path) {
@@ -1141,10 +1257,13 @@ public class BackupManager: ObservableObject {
                         let sourceAttr = try? self.fileManager.attributesOfItem(atPath: fileURL.path)
                         let targetAttr = try? self.fileManager.attributesOfItem(atPath: targetURL.path)
                         
+                        let sourceSize = (sourceAttr?[.size] as? Int64) ?? 0
+                        let targetSize = (targetAttr?[.size] as? Int64) ?? 0
                         let sourceDate = sourceAttr?[.modificationDate] as? Date ?? Date()
                         let targetDate = targetAttr?[.modificationDate] as? Date ?? Date.distantPast
                         
-                        if sourceDate.timeIntervalSince(targetDate) > 1.1 {
+                        // Cross-filesystem 2.0s tolerance window
+                        if (sourceSize != targetSize) || (sourceDate.timeIntervalSince(targetDate) > 2.0) {
                             outOfSyncFiles += 1
                         }
                     }
