@@ -535,6 +535,8 @@ struct RestoreDetailView: View {
     @EnvironmentObject var backupManager: BackupManager
     @State private var restoreMode: RestoreTabMode = .folderMapping
     @State private var conflictPolicy: ConflictPolicy = .keepBoth
+    @State private var includeOrphans: Bool = false
+    @State private var includeArchives: Bool = false
     @State private var selectiveDestination: URL = FileManager.default.homeDirectoryForCurrentUser
     @State private var selectedRestoreNodeID: String?
     @State private var searchFilter: String = ""
@@ -617,6 +619,8 @@ struct RestoreDetailView: View {
                     if restoreMode == .folderMapping {
                         FolderMappingRestoreView(
                             conflictPolicy: $conflictPolicy,
+                            includeOrphans: $includeOrphans,
+                            includeArchives: $includeArchives,
                             showingMappedRestoreConfirm: $showingMappedRestoreConfirm,
                             showingInsufficientSpaceAlert: $showingInsufficientSpaceAlert,
                             spaceAlertMessage: $spaceAlertMessage
@@ -625,6 +629,8 @@ struct RestoreDetailView: View {
                         SelectiveFileRestoreView(
                             selectiveDestination: $selectiveDestination,
                             conflictPolicy: $conflictPolicy,
+                            includeOrphans: $includeOrphans,
+                            includeArchives: $includeArchives,
                             selectedRestoreNodeID: $selectedRestoreNodeID,
                             searchFilter: $searchFilter,
                             showingSelectiveRestoreConfirm: $showingSelectiveRestoreConfirm,
@@ -642,22 +648,36 @@ struct RestoreDetailView: View {
         }
         .confirmationDialog("Confirm Folder Restore Mapping", isPresented: $showingMappedRestoreConfirm) {
             Button("Start Mapped Restore") {
-                backupManager.performMappedRestore(mappings: backupManager.restoreFolderMappings, conflictPolicy: conflictPolicy)
+                backupManager.performMappedRestore(
+                    mappings: backupManager.restoreFolderMappings,
+                    conflictPolicy: conflictPolicy,
+                    includeOrphans: includeOrphans,
+                    includeArchives: includeArchives
+                )
             }
             Button("Cancel", role: .cancel) {}
         } message: {
             let active = backupManager.restoreFolderMappings.filter { $0.isSelected }
             let summary = active.map { "• \($0.folderName) ➔ \($0.destinationURL.path)" }.joined(separator: "\n")
-            Text("The following \(active.count) folder(s) will be restored:\n\n\(summary)")
+            let orphanNote = includeOrphans ? "Including orphaned files" : "Excluding all orphaned files"
+            let archiveNote = includeArchives ? "Including version archives" : "Excluding version archives"
+            Text("The following \(active.count) folder(s) will be restored (\(orphanNote), \(archiveNote)):\n\n\(summary)")
         }
         .confirmationDialog("Restore Checked Items?", isPresented: $showingSelectiveRestoreConfirm) {
             Button("Restore \(backupManager.restoreCheckedNodes.count) Items") {
                 let nodes = backupManager.restoreCheckedNodes.compactMap { backupManager.findNode(by: $0) }
-                backupManager.performSelectiveRestore(nodes: nodes, destinationURL: selectiveDestination, conflictPolicy: conflictPolicy)
+                backupManager.performSelectiveRestore(
+                    nodes: nodes,
+                    destinationURL: selectiveDestination,
+                    conflictPolicy: conflictPolicy,
+                    includeOrphans: includeOrphans,
+                    includeArchives: includeArchives
+                )
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Selected \(backupManager.restoreCheckedNodes.count) item(s) will be restored to '\(selectiveDestination.path)'.")
+            let orphanNote = includeOrphans ? "including orphans" : "excluding orphans"
+            Text("Selected \(backupManager.restoreCheckedNodes.count) item(s) will be restored to '\(selectiveDestination.path)' (\(orphanNote)).")
         }
         .onAppear {
             if backupManager.restoreFolderMappings.isEmpty {
@@ -865,6 +885,8 @@ struct RestoreProgressBannerView: View {
 struct FolderMappingRestoreView: View {
     @EnvironmentObject var backupManager: BackupManager
     @Binding var conflictPolicy: ConflictPolicy
+    @Binding var includeOrphans: Bool
+    @Binding var includeArchives: Bool
     @Binding var showingMappedRestoreConfirm: Bool
     @Binding var showingInsufficientSpaceAlert: Bool
     @Binding var spaceAlertMessage: String
@@ -907,6 +929,36 @@ struct FolderMappingRestoreView: View {
             }
             .padding(.horizontal, 16)
             
+            // Options Bar (Exclude / Include Orphans & Archives)
+            HStack(spacing: 16) {
+                Toggle(isOn: $includeOrphans) {
+                    HStack(spacing: 4) {
+                        Image(systemName: includeOrphans ? "exclamationmark.triangle.fill" : "checkmark.shield")
+                            .foregroundColor(includeOrphans ? .orange : .secondary)
+                        Text("Include Orphaned Files (deleted from Mac)")
+                            .font(.caption)
+                    }
+                }
+                .toggleStyle(.checkbox)
+                
+                Toggle(isOn: $includeArchives) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .foregroundColor(.secondary)
+                        Text("Include Version Archives")
+                            .font(.caption)
+                    }
+                }
+                .toggleStyle(.checkbox)
+                
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
+            .background(Color.secondary.opacity(0.04))
+            .cornerRadius(6)
+            .padding(.horizontal, 16)
+            
             // Scrollable List of Mappings
             ScrollView {
                 VStack(spacing: 8) {
@@ -923,7 +975,11 @@ struct FolderMappingRestoreView: View {
                         .padding(40)
                     } else {
                         ForEach($backupManager.restoreFolderMappings) { $mapping in
-                            FolderMappingRowView(mapping: $mapping)
+                            FolderMappingRowView(
+                                mapping: $mapping,
+                                includeOrphans: includeOrphans,
+                                includeArchives: includeArchives
+                            )
                         }
                     }
                 }
@@ -952,13 +1008,21 @@ struct FolderMappingRestoreView: View {
                 Spacer()
                 
                 let activeMappings = backupManager.restoreFolderMappings.filter { $0.isSelected }
-                let totalBytes = activeMappings.reduce(0) { $0 + $1.totalSize }
+                let totalBytes = activeMappings.reduce(0) { $0 + (includeOrphans ? $1.totalSize : $1.activeSize) }
                 let freeSSD = backupManager.storageMetrics.macSSDFreeSpace
                 
                 VStack(alignment: .trailing, spacing: 2) {
                     Text("Restore: \(totalBytes.formattedBytes) (\(activeMappings.count) folders)")
                         .font(.caption)
                         .bold()
+                    if !includeOrphans {
+                        let totalOrphans = activeMappings.reduce(0) { $0 + $1.orphanCount }
+                        if totalOrphans > 0 {
+                            Text("\(totalOrphans) orphan(s) excluded")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
                     Text("Mac SSD Free: \(freeSSD.formattedBytes)")
                         .font(.caption2)
                         .foregroundColor(totalBytes > freeSSD ? .red : .secondary)
@@ -1005,6 +1069,8 @@ struct FolderMappingRestoreView: View {
 
 struct FolderMappingRowView: View {
     @Binding var mapping: FolderRestoreMapping
+    var includeOrphans: Bool = false
+    var includeArchives: Bool = false
     let home = FileManager.default.homeDirectoryForCurrentUser
 
     var body: some View {
@@ -1024,15 +1090,24 @@ struct FolderMappingRowView: View {
                     .font(.headline)
                     .lineLimit(1)
                 
+                let displayBytes = includeOrphans ? mapping.totalSize : mapping.activeSize
+                let displayCount = includeOrphans ? mapping.fileCount : mapping.activeFileCount
+                
                 HStack(spacing: 6) {
-                    Text(mapping.totalSize.formattedBytes)
+                    Text(displayBytes.formattedBytes)
                         .font(.caption)
                         .bold()
                     Text("•")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    Text("\(mapping.fileCount) files")
+                    Text("\(displayCount) active")
                         .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                if !includeOrphans && mapping.orphanCount > 0 {
+                    Text("\(mapping.orphanCount) orphan(s) excluded")
+                        .font(.system(size: 9))
                         .foregroundColor(.secondary)
                 }
                 
@@ -1127,6 +1202,8 @@ struct SelectiveFileRestoreView: View {
     @EnvironmentObject var backupManager: BackupManager
     @Binding var selectiveDestination: URL
     @Binding var conflictPolicy: ConflictPolicy
+    @Binding var includeOrphans: Bool
+    @Binding var includeArchives: Bool
     @Binding var selectedRestoreNodeID: String?
     @Binding var searchFilter: String
     @Binding var showingSelectiveRestoreConfirm: Bool
@@ -1199,6 +1276,36 @@ struct SelectiveFileRestoreView: View {
             .cornerRadius(6)
             .padding(.horizontal, 16)
             
+            // Options Bar (Exclude / Include Orphans & Archives in folder restores)
+            HStack(spacing: 16) {
+                Toggle(isOn: $includeOrphans) {
+                    HStack(spacing: 4) {
+                        Image(systemName: includeOrphans ? "exclamationmark.triangle.fill" : "checkmark.shield")
+                            .foregroundColor(includeOrphans ? .orange : .secondary)
+                        Text("Include Orphaned Files in folder restores")
+                            .font(.caption)
+                    }
+                }
+                .toggleStyle(.checkbox)
+                
+                Toggle(isOn: $includeArchives) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .foregroundColor(.secondary)
+                        Text("Include Version Archives")
+                            .font(.caption)
+                    }
+                }
+                .toggleStyle(.checkbox)
+                
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
+            .background(Color.secondary.opacity(0.04))
+            .cornerRadius(6)
+            .padding(.horizontal, 16)
+            
             // Tree List
             List(filteredNodes, children: \.children, selection: $selectedRestoreNodeID) { node in
                 HStack {
@@ -1220,6 +1327,26 @@ struct SelectiveFileRestoreView: View {
                         .frame(width: 16, height: 16)
                     
                     Text(node.name)
+                        .foregroundColor(node.isOrphaned ? .orange : .primary)
+                    
+                    if node.isOrphaned {
+                        Text("Orphan")
+                            .font(.system(size: 8, weight: .bold))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.orange.opacity(0.15))
+                            .foregroundColor(.orange)
+                            .cornerRadius(3)
+                    }
+                    if node.isVersionedArchive {
+                        Text("Archive")
+                            .font(.system(size: 8, weight: .bold))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.secondary.opacity(0.15))
+                            .foregroundColor(.secondary)
+                            .cornerRadius(3)
+                    }
                     
                     Spacer(minLength: 20)
                     
@@ -1592,7 +1719,7 @@ struct GlobalStatusFooterView: View {
             Divider().frame(height: 12)
             
             VStack(alignment: .trailing, spacing: 0) {
-                Text("v2.3.0")
+                Text("v2.4.0")
                 Text("Made for my Love - DG").italic()
             }
             .font(.system(size: 9))

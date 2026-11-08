@@ -121,7 +121,7 @@ final class MacBackupTests: XCTestCase {
 
     func testManifestSaveAndLoad() throws {
         let manifest = BackupManifest(
-            version: "2.3.0",
+            version: "2.4.0",
             friendlyName: "Samsung T7",
             sources: [
                 SourceMapping(folderName: "Documents", relativeHomePath: "Documents", lastKnownPath: "/Users/test/Documents")
@@ -132,7 +132,7 @@ final class MacBackupTests: XCTestCase {
         let loaded = ManifestManager.load(from: tempDirectory)
 
         XCTAssertNotNil(loaded)
-        XCTAssertEqual(loaded?.version, "2.3.0")
+        XCTAssertEqual(loaded?.version, "2.4.0")
         XCTAssertEqual(loaded?.friendlyName, "Samsung T7")
         XCTAssertEqual(loaded?.sources.count, 1)
         XCTAssertEqual(loaded?.sources.first?.folderName, "Documents")
@@ -143,7 +143,7 @@ final class MacBackupTests: XCTestCase {
         // Manifest created with a different machine ID
         let foreignMachine = MachineMetadata(machineId: "FOREIGN_MACHINE_UUID", hostname: "MacBookPro-Other", username: "alex")
         let manifest = BackupManifest(
-            version: "2.3.0",
+            version: "2.4.0",
             friendlyName: "External Drive",
             lastBackupMachine: foreignMachine
         )
@@ -295,5 +295,81 @@ final class MacBackupTests: XCTestCase {
             expectation.fulfill()
         }
         wait(for: [expectation], timeout: 2.0)
+    }
+
+    func testFolderRestoreMappingActiveAndOrphanMetrics() {
+        let sourceURL = tempDirectory.appendingPathComponent("Projects")
+        let destURL = tempDirectory.appendingPathComponent("RestoredProjects")
+        
+        let mapping = FolderRestoreMapping(
+            folderName: "Projects",
+            sourceFolderURL: sourceURL,
+            destinationURL: destURL,
+            isSelected: true,
+            totalSize: 2000,
+            fileCount: 4,
+            activeSize: 1500,
+            activeFileCount: 3,
+            orphanCount: 1,
+            orphanSize: 500,
+            originalPath: "/Users/test/Projects"
+        )
+        
+        XCTAssertEqual(mapping.totalSize, 2000)
+        XCTAssertEqual(mapping.fileCount, 4)
+        XCTAssertEqual(mapping.activeSize, 1500)
+        XCTAssertEqual(mapping.activeFileCount, 3)
+        XCTAssertEqual(mapping.orphanCount, 1)
+        XCTAssertEqual(mapping.orphanSize, 500)
+    }
+
+    func testRestoreExcludesOrphansByDefault() throws {
+        let backupDir = tempDirectory.appendingPathComponent("BackupDir")
+        let restoreDir = tempDirectory.appendingPathComponent("RestoreDir")
+        try FileManager.default.createDirectory(at: backupDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: restoreDir, withIntermediateDirectories: true)
+        
+        // Active file
+        let activeFile = backupDir.appendingPathComponent("active.txt")
+        try "active content".data(using: .utf8)!.write(to: activeFile)
+        
+        // Orphaned file
+        let orphanFile = backupDir.appendingPathComponent("deleted_on_mac.txt")
+        try "orphan content".data(using: .utf8)!.write(to: orphanFile)
+        
+        let activeNode = FileSystemNode(url: activeFile, name: "active.txt", isDirectory: false, modificationDate: Date(), size: 14, isOrphaned: false, isVersionedArchive: false)
+        let orphanNode = FileSystemNode(url: orphanFile, name: "deleted_on_mac.txt", isDirectory: false, modificationDate: Date(), size: 14, isOrphaned: true, isVersionedArchive: false)
+        let rootNode = FileSystemNode(url: backupDir, name: "BackupDir", isDirectory: true, modificationDate: Date(), size: 28, isOrphaned: false, isVersionedArchive: false, children: [activeNode, orphanNode])
+        
+        let manager = BackupManager()
+        manager.targetFolder = tempDirectory
+        manager.targetNodes = [rootNode]
+        
+        let mapping = FolderRestoreMapping(
+            folderName: "BackupDir",
+            sourceFolderURL: backupDir,
+            destinationURL: restoreDir,
+            isSelected: true,
+            totalSize: 28,
+            fileCount: 2,
+            activeSize: 14,
+            activeFileCount: 1,
+            orphanCount: 1,
+            orphanSize: 14
+        )
+        
+        let exp = XCTestExpectation(description: "Restore completes without orphans")
+        manager.performMappedRestore(mappings: [mapping], conflictPolicy: .overwrite, includeOrphans: false, includeArchives: false)
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            let restoredActive = restoreDir.appendingPathComponent("active.txt")
+            let restoredOrphan = restoreDir.appendingPathComponent("deleted_on_mac.txt")
+            
+            XCTAssertTrue(FileManager.default.fileExists(atPath: restoredActive.path), "Active file should be restored")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: restoredOrphan.path), "Orphan file must NOT be restored when includeOrphans is false")
+            exp.fulfill()
+        }
+        
+        wait(for: [exp], timeout: 3.0)
     }
 }

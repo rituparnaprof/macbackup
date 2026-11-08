@@ -146,6 +146,10 @@ public struct FolderRestoreMapping: Identifiable, Equatable, Sendable {
     public var isSelected: Bool
     public var totalSize: Int64
     public var fileCount: Int
+    public var activeSize: Int64
+    public var activeFileCount: Int
+    public var orphanCount: Int
+    public var orphanSize: Int64
     public var originalPath: String?
 
     public init(
@@ -155,6 +159,10 @@ public struct FolderRestoreMapping: Identifiable, Equatable, Sendable {
         isSelected: Bool = true,
         totalSize: Int64 = 0,
         fileCount: Int = 0,
+        activeSize: Int64 = 0,
+        activeFileCount: Int = 0,
+        orphanCount: Int = 0,
+        orphanSize: Int64 = 0,
         originalPath: String? = nil
     ) {
         self.folderName = folderName
@@ -163,6 +171,10 @@ public struct FolderRestoreMapping: Identifiable, Equatable, Sendable {
         self.isSelected = isSelected
         self.totalSize = totalSize
         self.fileCount = fileCount
+        self.activeSize = activeSize
+        self.activeFileCount = activeFileCount
+        self.orphanCount = orphanCount
+        self.orphanSize = orphanSize
         self.originalPath = originalPath
     }
 }
@@ -985,18 +997,44 @@ public class BackupManager: ObservableObject {
         }
     }
 
-    private func restoreNodeRecursively(_ node: FileSystemNode, relativeToBase: URL, destinationBase: URL, conflictPolicy: ConflictPolicy, startTime: Date) throws {
+    private func restoreNodeRecursively(
+        _ node: FileSystemNode,
+        relativeToBase: URL,
+        destinationBase: URL,
+        conflictPolicy: ConflictPolicy,
+        includeOrphans: Bool = false,
+        includeArchives: Bool = false,
+        startTime: Date
+    ) throws {
         if isCancelRequested {
             throw NSError(domain: "RestoreEngine", code: 99, userInfo: [NSLocalizedDescriptionKey: "Restore cancelled by user."])
+        }
+        
+        if !includeOrphans && node.isOrphaned {
+            return
         }
         
         if node.isDirectory {
             if let children = node.children {
                 for child in children {
-                    try restoreNodeRecursively(child, relativeToBase: relativeToBase, destinationBase: destinationBase, conflictPolicy: conflictPolicy, startTime: startTime)
+                    try restoreNodeRecursively(
+                        child,
+                        relativeToBase: relativeToBase,
+                        destinationBase: destinationBase,
+                        conflictPolicy: conflictPolicy,
+                        includeOrphans: includeOrphans,
+                        includeArchives: includeArchives,
+                        startTime: startTime
+                    )
                 }
             }
         } else {
+            if !includeOrphans && node.isOrphaned {
+                return
+            }
+            if !includeArchives && node.isVersionedArchive {
+                return
+            }
             guard let relativePath = PathSecurity.relativeSubpath(of: node.url, relativeTo: relativeToBase) else {
                 return
             }
@@ -1054,9 +1092,16 @@ public class BackupManager: ObservableObject {
                 selected = true
             }
             
-            let flat = flattenNodes([node]).filter { !$0.isDirectory }
-            let totalBytes = flat.reduce(0) { $0 + $1.size }
-            let fileCount = flat.count
+            let allLeaves = flattenNodes([node]).filter { !$0.isDirectory }
+            let activeLeaves = allLeaves.filter { !$0.isOrphaned && !$0.isVersionedArchive }
+            let orphanLeaves = allLeaves.filter { $0.isOrphaned }
+            
+            let totalBytes = allLeaves.reduce(0) { $0 + $1.size }
+            let totalCount = allLeaves.count
+            let activeBytes = activeLeaves.reduce(0) { $0 + $1.size }
+            let activeCount = activeLeaves.count
+            let orphanBytes = orphanLeaves.reduce(0) { $0 + $1.size }
+            let orphanCount = orphanLeaves.count
             
             newMappings.append(FolderRestoreMapping(
                 folderName: folderName,
@@ -1064,7 +1109,11 @@ public class BackupManager: ObservableObject {
                 destinationURL: dest,
                 isSelected: selected,
                 totalSize: totalBytes,
-                fileCount: fileCount,
+                fileCount: totalCount,
+                activeSize: activeBytes,
+                activeFileCount: activeCount,
+                orphanCount: orphanCount,
+                orphanSize: orphanBytes,
                 originalPath: originalPath
             ))
         }
@@ -1074,6 +1123,8 @@ public class BackupManager: ObservableObject {
             let dest = existing?.destinationURL ?? home.appendingPathComponent("Restored_Root_Files")
             let selected = existing?.isSelected ?? true
             let totalBytes = rootFiles.reduce(0) { $0 + $1.size }
+            let activeFiles = rootFiles.filter { !$0.isOrphaned && !$0.isVersionedArchive }
+            let orphanFiles = rootFiles.filter { $0.isOrphaned }
             newMappings.append(FolderRestoreMapping(
                 folderName: "Root Files",
                 sourceFolderURL: target,
@@ -1081,6 +1132,10 @@ public class BackupManager: ObservableObject {
                 isSelected: selected,
                 totalSize: totalBytes,
                 fileCount: rootFiles.count,
+                activeSize: activeFiles.reduce(0) { $0 + $1.size },
+                activeFileCount: activeFiles.count,
+                orphanCount: orphanFiles.count,
+                orphanSize: orphanFiles.reduce(0) { $0 + $1.size },
                 originalPath: target.path
             ))
         }
@@ -1117,7 +1172,12 @@ public class BackupManager: ObservableObject {
         }
     }
 
-    public func performMappedRestore(mappings: [FolderRestoreMapping], conflictPolicy: ConflictPolicy = .keepBoth) {
+    public func performMappedRestore(
+        mappings: [FolderRestoreMapping],
+        conflictPolicy: ConflictPolicy = .keepBoth,
+        includeOrphans: Bool = false,
+        includeArchives: Bool = false
+    ) {
         guard let target = targetFolder else { return }
         guard !isRestoring && !isBackingUp else { return }
         
@@ -1133,7 +1193,9 @@ public class BackupManager: ObservableObject {
         transferRateFormatted = ""
         estimatedTimeRemainingFormatted = ""
         
-        let totalBytes = activeMappings.reduce(0) { $0 + $1.totalSize }
+        let totalBytes = activeMappings.reduce(0) { sum, m in
+            sum + (includeOrphans ? m.totalSize : m.activeSize)
+        }
         totalBytesToTransfer = totalBytes
         
         let token = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "Running Mapped Restore")
@@ -1158,7 +1220,12 @@ public class BackupManager: ObservableObject {
                     }
                     
                     if mapping.sourceFolderURL == target {
-                        let rootFiles = self.targetNodes.filter { !$0.isDirectory }
+                        let rootFiles = self.targetNodes.filter { leaf in
+                            if leaf.isDirectory { return false }
+                            if !includeOrphans && leaf.isOrphaned { return false }
+                            if !includeArchives && leaf.isVersionedArchive { return false }
+                            return true
+                        }
                         for f in rootFiles {
                             if self.isCancelRequested {
                                 throw NSError(domain: "RestoreEngine", code: 99, userInfo: [NSLocalizedDescriptionKey: "Restore cancelled by user."])
@@ -1175,9 +1242,24 @@ public class BackupManager: ObservableObject {
                             }
                         }
                     } else if let rootNode = self.targetNodes.first(where: { $0.url == mapping.sourceFolderURL }) {
-                        try self.restoreFolderMappingRecursively(rootNode, sourceRoot: mapping.sourceFolderURL, destinationRoot: mapping.destinationURL, conflictPolicy: conflictPolicy, startTime: startTime)
+                        try self.restoreFolderMappingRecursively(
+                            rootNode,
+                            sourceRoot: mapping.sourceFolderURL,
+                            destinationRoot: mapping.destinationURL,
+                            conflictPolicy: conflictPolicy,
+                            includeOrphans: includeOrphans,
+                            includeArchives: includeArchives,
+                            startTime: startTime
+                        )
                     } else {
-                        try self.restoreDirectoryFromDisk(sourceDir: mapping.sourceFolderURL, destinationDir: mapping.destinationURL, conflictPolicy: conflictPolicy, startTime: startTime)
+                        try self.restoreDirectoryFromDisk(
+                            sourceDir: mapping.sourceFolderURL,
+                            destinationDir: mapping.destinationURL,
+                            conflictPolicy: conflictPolicy,
+                            includeOrphans: includeOrphans,
+                            includeArchives: includeArchives,
+                            startTime: startTime
+                        )
                     }
                 }
                 
@@ -1201,18 +1283,45 @@ public class BackupManager: ObservableObject {
         }
     }
 
-    private func restoreFolderMappingRecursively(_ node: FileSystemNode, sourceRoot: URL, destinationRoot: URL, conflictPolicy: ConflictPolicy, startTime: Date) throws {
+    private func restoreFolderMappingRecursively(
+        _ node: FileSystemNode,
+        sourceRoot: URL,
+        destinationRoot: URL,
+        conflictPolicy: ConflictPolicy,
+        includeOrphans: Bool = false,
+        includeArchives: Bool = false,
+        startTime: Date
+    ) throws {
         if isCancelRequested {
             throw NSError(domain: "RestoreEngine", code: 99, userInfo: [NSLocalizedDescriptionKey: "Restore cancelled by user."])
+        }
+        
+        if !includeOrphans && node.isOrphaned {
+            return
         }
         
         if node.isDirectory {
             if let children = node.children {
                 for child in children {
-                    try restoreFolderMappingRecursively(child, sourceRoot: sourceRoot, destinationRoot: destinationRoot, conflictPolicy: conflictPolicy, startTime: startTime)
+                    try restoreFolderMappingRecursively(
+                        child,
+                        sourceRoot: sourceRoot,
+                        destinationRoot: destinationRoot,
+                        conflictPolicy: conflictPolicy,
+                        includeOrphans: includeOrphans,
+                        includeArchives: includeArchives,
+                        startTime: startTime
+                    )
                 }
             }
         } else {
+            if !includeOrphans && node.isOrphaned {
+                return
+            }
+            if !includeArchives && node.isVersionedArchive {
+                return
+            }
+            
             guard let relativePath = PathSecurity.relativeSubpath(of: node.url, relativeTo: sourceRoot) else {
                 return
             }
@@ -1236,7 +1345,14 @@ public class BackupManager: ObservableObject {
         }
     }
 
-    private func restoreDirectoryFromDisk(sourceDir: URL, destinationDir: URL, conflictPolicy: ConflictPolicy, startTime: Date) throws {
+    private func restoreDirectoryFromDisk(
+        sourceDir: URL,
+        destinationDir: URL,
+        conflictPolicy: ConflictPolicy,
+        includeOrphans: Bool = false,
+        includeArchives: Bool = false,
+        startTime: Date
+    ) throws {
         let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey, .isSymbolicLinkKey]
         let enumerator = fileManager.enumerator(at: sourceDir, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles, .skipsPackageDescendants])
         
@@ -1248,6 +1364,16 @@ public class BackupManager: ObservableObject {
             if vals?.isSymbolicLink == true || vals?.isDirectory == true {
                 continue
             }
+            
+            let isArchive = Self.archiveRegex.firstMatch(in: fileURL.lastPathComponent, options: [], range: NSRange(location: 0, length: fileURL.lastPathComponent.utf16.count)) != nil
+            if !includeArchives && isArchive {
+                continue
+            }
+            
+            if let cachedNode = self.nodeLookup[fileURL.path], !includeOrphans && cachedNode.isOrphaned {
+                continue
+            }
+            
             guard let relativePath = PathSecurity.relativeSubpath(of: fileURL, relativeTo: sourceDir) else {
                 continue
             }
@@ -1277,7 +1403,12 @@ public class BackupManager: ObservableObject {
         return (allowed, bytesNeeded.formattedBytes, free.formattedBytes)
     }
 
-    public func performFullRestore(to destinationBaseURL: URL, conflictPolicy: ConflictPolicy = .keepBoth) {
+    public func performFullRestore(
+        to destinationBaseURL: URL,
+        conflictPolicy: ConflictPolicy = .keepBoth,
+        includeOrphans: Bool = false,
+        includeArchives: Bool = false
+    ) {
         guard let target = targetFolder else { return }
         guard !isRestoring && !isBackingUp else { return }
         
@@ -1291,7 +1422,12 @@ public class BackupManager: ObservableObject {
         estimatedTimeRemainingFormatted = ""
         
         let validNodes = targetNodes.filter { $0.name != ManifestManager.manifestDirectoryName }
-        let totalBytes = flattenNodes(validNodes).filter { !$0.isDirectory }.reduce(0) { $0 + $1.size }
+        let totalBytes = flattenNodes(validNodes).filter { leaf in
+            if leaf.isDirectory { return false }
+            if !includeOrphans && leaf.isOrphaned { return false }
+            if !includeArchives && leaf.isVersionedArchive { return false }
+            return true
+        }.reduce(0) { $0 + $1.size }
         totalBytesToTransfer = totalBytes
         
         let token = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "Running Restore")
@@ -1307,7 +1443,15 @@ public class BackupManager: ObservableObject {
             
             do {
                 for node in validNodes {
-                    try self.restoreNodeRecursively(node, relativeToBase: target, destinationBase: destinationBaseURL, conflictPolicy: conflictPolicy, startTime: startTime)
+                    try self.restoreNodeRecursively(
+                        node,
+                        relativeToBase: target,
+                        destinationBase: destinationBaseURL,
+                        conflictPolicy: conflictPolicy,
+                        includeOrphans: includeOrphans,
+                        includeArchives: includeArchives,
+                        startTime: startTime
+                    )
                 }
                 
                 DispatchQueue.main.async {
@@ -1330,7 +1474,13 @@ public class BackupManager: ObservableObject {
         }
     }
 
-    public func performSelectiveRestore(nodes: [FileSystemNode], destinationURL: URL, conflictPolicy: ConflictPolicy = .keepBoth) {
+    public func performSelectiveRestore(
+        nodes: [FileSystemNode],
+        destinationURL: URL,
+        conflictPolicy: ConflictPolicy = .keepBoth,
+        includeOrphans: Bool = false,
+        includeArchives: Bool = false
+    ) {
         guard targetFolder != nil else { return }
         guard !isRestoring && !isBackingUp else { return }
         
@@ -1343,7 +1493,12 @@ public class BackupManager: ObservableObject {
         transferRateFormatted = ""
         estimatedTimeRemainingFormatted = ""
         
-        let totalBytes = flattenNodes(nodes).filter { !$0.isDirectory }.reduce(0) { $0 + $1.size }
+        let totalBytes = flattenNodes(nodes).filter { leaf in
+            if leaf.isDirectory { return false }
+            if !includeOrphans && leaf.isOrphaned && !nodes.contains(where: { $0.id == leaf.id }) { return false }
+            if !includeArchives && leaf.isVersionedArchive && !nodes.contains(where: { $0.id == leaf.id }) { return false }
+            return true
+        }.reduce(0) { $0 + $1.size }
         totalBytesToTransfer = totalBytes
         
         let token = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "Running Selective Restore")
@@ -1361,7 +1516,15 @@ public class BackupManager: ObservableObject {
                 for node in nodes {
                     if node.isDirectory {
                         let sourceParent = node.url.deletingLastPathComponent()
-                        try self.restoreFolderMappingRecursively(node, sourceRoot: sourceParent, destinationRoot: destinationURL, conflictPolicy: conflictPolicy, startTime: startTime)
+                        try self.restoreFolderMappingRecursively(
+                            node,
+                            sourceRoot: sourceParent,
+                            destinationRoot: destinationURL,
+                            conflictPolicy: conflictPolicy,
+                            includeOrphans: includeOrphans,
+                            includeArchives: includeArchives,
+                            startTime: startTime
+                        )
                     } else {
                         if self.isCancelRequested {
                             throw NSError(domain: "RestoreEngine", code: 99, userInfo: [NSLocalizedDescriptionKey: "Restore cancelled by user."])
