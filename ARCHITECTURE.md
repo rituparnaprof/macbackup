@@ -1,6 +1,6 @@
 # MacBackup Architecture & Design 🏗️
 
-This document details the internal design, components, and data flow of **MacBackup v2.2.1**.
+This document details the internal design, components, and data flow of **MacBackup v2.3.0**.
 
 ---
 
@@ -14,7 +14,7 @@ flowchart TD
     C -- "No drive registered & backup repo found on volume" --> D["Open Setup Assistant Modal Sheet"]
     C -- "Configured drive connected" --> E{"Inspect Manifest"}
     
-    subgraph SetupAssistant ["Smart Setup Assistant (v2.2.1)"]
+    subgraph SetupAssistant ["Smart Setup Assistant"]
         D --> D1{"Same Mac or New Mac?"}
         D1 -- "Same Mac" --> D2["1-Click Reconnect & Resume Backups"]
         D1 -- "New Mac" --> D3["1-Click Restore to this Mac"]
@@ -31,18 +31,30 @@ flowchart TD
     F --> H["Incremental Backup (Mac SSD -> Drive)"]
     G --> I["Freeze Orphan Detection & Migration Assistant Banner"]
     
-    subgraph DataOperations ["Data Operations Pipeline"]
-        H --> OP1["Incremental Sync & Atomic Move"]
-        I --> OP2["Pre-Flight Space Guard & Full Restore"]
-        OP3["Selective File / Folder Restore"]
-        OP4["Orphan Review & Reclaimable Space Analytics"]
-        OP5["Graceful Mid-Stream Cancel & .tmp Cleanup"]
-        OP6["Security Boundary & Symlink Defense"]
+    subgraph RestorePipeline ["Interactive Restore System (v2.3.0)"]
+        G --> R1{"Choose Restore Mode"}
+        R1 -- "Folder Mappings (Default)" --> R2["Interactive Source ➔ Destination Mapping"]
+        R2 --> R3["Auto-Map to This Mac (~/Documents, ~/Desktop)"]
+        R2 --> R4["Custom Per-Folder Destination Chooser"]
+        R2 --> R5["Set Common Destination Folder"]
+        R1 -- "Browse & Selective Files" --> R6["Granular File Tree Explorer & Search"]
+        R6 --> R7["Select Specific Files/Subfolders to Restore"]
+        
+        R2 --> R8["Pre-Flight Space Guard & Conflict Policy"]
+        R6 --> R8
+        R8 --> R9["Atomic Copy, SHA-256 Verification & Live ETA"]
     end
     
-    subgraph GlobalUI ["Global Persistent UI (v2.2.1)"]
+    subgraph DataOperations ["Data Operations Pipeline"]
+        H --> OP1["Incremental Sync & Atomic Move"]
+        OP3["Orphan Review & Reclaimable Space Analytics"]
+        OP4["Graceful Mid-Stream Cancel & .tmp Cleanup"]
+        OP5["Security Boundary & Symlink Defense"]
+    end
+    
+    subgraph GlobalUI ["Global Persistent UI"]
         UI1["Navigation Detail View (Backup | Restore | Orphan Cleanup)"]
-        UI2["GlobalStatusFooterView (Last Backup, New/Modified Stats, Total Items, v2.2.1, Dedication)"]
+        UI2["GlobalStatusFooterView (Last Backup, New/Modified Stats, Total Items, v2.3.0, Dedication)"]
         UI1 --- UI2
     end
 ```
@@ -52,7 +64,7 @@ flowchart TD
 ## 2. Core Components
 
 ### `BackupManifest.swift`
-- **Data Model**: Implements `BackupManifest`, `SourceMapping`, and `MachineMetadata` conforming to `Codable` and `Sendable`. Versioned at `"2.2.1"`.
+- **Data Model**: Implements `BackupManifest`, `SourceMapping`, and `MachineMetadata` conforming to `Codable` and `Sendable`. Versioned at `"2.3.0"`.
 - **On-Disk Manifest**: Stored in a hidden container directory `.macbackup/manifest.json` on the target volume.
 - **Machine Identification**: Compares persistent `machineId` in `UserDefaults` against the manifest's `lastBackupMachine.machineId`.
   - When matching: the current machine is recognized as the owner.
@@ -60,66 +72,70 @@ flowchart TD
 
 ### `BackupManager.swift`
 The central observable engine (`ObservableObject`), handling all backup, restore, metrics, security checks, and lifecycle events:
-1. **Smart Drive Discovery & Interactive Setup Assistant (v2.2.1)**:
+1. **Interactive Source & Destination Restore Mapping (v2.3.0)**:
+   - `FolderRestoreMapping`: Data model representing each backed-up source folder (`folderName`, `sourceFolderURL`, `destinationURL`, `isSelected`, `totalSize`, `fileCount`, `originalPath`).
+   - `refreshRestoreFolderMappings()`: Inspects `targetNodes` and manifest sources to dynamically generate folder mappings. Preserves custom user destination choices across view updates.
+   - `autoMapRestoreDestinationsToStandardFolders()`: 1-click remapping of all discovered backup folders to standard user directories on this Mac (`~/Documents`, `~/Desktop`, `~/Pictures`, etc.).
+   - `setCommonRestoreDestination(_:)`: Directs all selected folders into a user-specified parent directory (e.g. `~/RestoredBackup/Documents`).
+   - `performMappedRestore(mappings:conflictPolicy:)`: Restores selected source folders into their respective target destinations, preserving directory structure, with sleep prevention, live ETA, and SHA-256 integrity verification.
+2. **Selective File & Subfolder Restore (v2.3.0)**:
+   - `restoreCheckedNodes`: Dedicated selection set for restoring specific files or subdirectories from the backup file tree.
+   - `performSelectiveRestore(nodes:destinationURL:conflictPolicy:)`: Restores checked items directly into a chosen folder without corrupting parent paths.
+3. **Smart Drive Discovery & Interactive Setup Assistant**:
    - `DiscoveredBackup`: Encapsulates discovered backup volume URL, backup folder URL, manifest metadata, volume display name, and machine matching boolean.
    - `scanMountedVolumesForBackups()`: Scans all mounted volumes (`/Volumes/*`) via `FileManager.default.mountedVolumeURLs` for existing `.macbackup/manifest.json` containers without requiring manual folder picking.
-   - `reconnectDiscoveredBackup(_:)`: 1-click reconnection that sets target folder, saves security bookmark, restores source folder paths from manifest, and triggers sync calculation.
-   - `prepareRestoreFromDiscoveredBackup(_:)`: Connects target folder in read-only migration mode and immediately switches navigation to the Restore tab.
-   - `adoptAndPairDiscoveredBackup(_:)`: Adopts the repository, re-writes the manifest with the current Mac's credentials, and activates regular sync.
-2. **Path Security & Boundary Containment**:
+   - `reconnectDiscoveredBackup(_:)`, `prepareRestoreFromDiscoveredBackup(_:)`, `adoptAndPairDiscoveredBackup(_:)`.
+4. **Path Security & Boundary Containment**:
    - `PathSecurity.relativeSubpath`: Canonical prefix stripping to eliminate path traversal vulnerabilities and duplicate directory collisions.
-   - `PathSecurity.isSubpath`: Enforces hard boundary checks on all deletion (`deleteNode`, `deleteSelectedNodes`) and recovery (`recoverOrphan`) operations to ensure no files outside the backup volume can ever be modified or removed.
-3. **Drive Registration & Lifecycle**:
-   - Manages four distinct states: `.disconnected`, `.unregistered`, `.pairedThisMac`, and `.pairedOtherMac`.
-   - `deregisterFromThisMac()`: Unlinks the drive from the current Mac's local preferences without altering any backup data.
-   - `deregisterAndWipeMetadata()`: Removes `.macbackup/` container metadata while preserving user files.
-   - `adoptBackupForThisMac()`: Updates the manifest's owning machine to the current Mac, re-enabling regular backup sync.
-   - `autoLinkStandardFolders()`: Matches folders recorded in the manifest with corresponding local directories on the current user's Mac (`~/Documents`, `~/Desktop`, `~/Pictures`, etc.).
-4. **Fail-Safe Incremental Backup**:
+   - `PathSecurity.isSubpath`: Enforces hard boundary checks on all deletion and recovery operations.
+5. **Fail-Safe Incremental Backup**:
    - Re-entrancy guards prevent overlapping executions (`guard !isBackingUp && !isRestoring`).
    - Sleep prevention via scoped `ProcessInfo` activity assertions.
-   - Cross-filesystem timestamp tolerance: 2.0-second window plus post-copy timestamp synchronization to prevent FAT32/exFAT duplicate archive loops.
+   - Cross-filesystem timestamp tolerance: 2.0-second window plus post-copy timestamp synchronization.
    - Sequence numbering on archive collisions (`_1`, `_2`) to prevent accidental deletion of historical versions.
-   - Per-file error isolation: transient file read failures (e.g. temporary caches) are safely skipped without aborting the broader backup job.
-   - Symlink cycle suppression: skips directory symlinks to avoid recursion loops and private credential leaks.
-5. **Storage & Reclaimable Space Analytics**:
+   - Per-file error isolation: transient file read failures are safely skipped without aborting the broader backup job.
+6. **Storage & Reclaimable Space Analytics**:
    - `StorageMetrics` tracks total volume capacity, free space, active backup footprint, version archives, and space consumed by orphaned files.
    - Real-time Mac SSD free space monitoring for pre-flight safety checks.
-6. **Live Performance & Graceful Cancellation**:
+7. **Live Performance & Graceful Cancellation**:
    - Real-time throughput (`transferRateFormatted` in MB/s) and rolling ETA (`estimatedTimeRemainingFormatted`).
    - `cancelTransfer()`: Instantly halts active transfers and immediately purges orphaned `.tmp` files.
-7. **Restore Engine & Space Guard**:
+8. **Restore Engine & Space Guard**:
    - `canRestore(bytesNeeded:)`: Validates destination Mac SSD storage with a safety margin before initiating recovery.
    - Atomic replacement: uses `FileManager.replaceItemAt` during overwrite restores to guarantee the original file is preserved if transfer fails.
    - Safe conflict policies: `Keep Both` (with sequence numbering), `Overwrite`, and `Skip If Exists`.
-8. **Algorithmic Performance & Caching**:
-   - Fast $O(1)$ node lookup dictionary (`nodeLookup`) replacing recursive $O(M \times N)$ traversals during selection actions.
-   - Cached `allOrphans` and `allVersionedArchives` arrays to maintain 60/120 FPS SwiftUI list scrolling.
-   - Static pre-compiled regular expressions for timestamp matching.
 
 ### `ContentView.swift`
+- **Interactive Restore View (`RestoreDetailView`)**:
+  - **Empty State (`RestoreEmptyStateView`)**: When no drive is connected, displays a helpful guide with a 1-click "Choose Backup Folder..." button and a list of all auto-discovered backups on external volumes.
+  - **Source Repository Banner (`RestoreSourceHeaderView`)**: Displays repository path, origin Mac, and last updated timestamp with a quick "Switch Backup..." button.
+  - **Restore Mode Switcher**: Toggle between **Folder Mappings** and **Browse & Selective Files**.
+  - **Folder Mappings (`FolderMappingRestoreView` & `FolderMappingRowView`)**:
+    - Per-folder card showing source folder name, size, file count, and original Mac path.
+    - Directional arrow pointing to the mapped destination path on the current Mac.
+    - "Change..." button to choose any custom folder, and reset button to return to standard default.
+    - Batch actions: "Auto-Map to This Mac", "Set Common Destination...", "Select All", and "Deselect All".
+  - **Selective Browser (`SelectiveFileRestoreView`)**:
+    - Live file search and filter bar.
+    - Hierarchical tree explorer with checkboxes for granular restoration of individual files and subfolders.
+    - Dedicated restore destination selector.
+  - **Pre-Flight Space & Conflict Policy Bar**:
+    - Displays total selected size, available Mac SSD space, and conflict policy selector.
+    - Prominent confirmation dialog before starting restore.
 - **Global Persistent Status Bar (`GlobalStatusFooterView`)**:
   - Permanently anchored at the base of the application window across all 3 primary tabs (**Backup**, **Restore**, **Orphan Cleanup**).
-  - Displays Last Backup timestamp, New Files count, Modified Files count, Total item count, version string (`v2.2.1`), and dedication (*"Made for my Love - DG"*).
-- **Interactive Setup Assistant Sheet (`SetupAssistantView`)**:
-  - Automatically presented when an unregistered or unconfigured drive containing an existing backup container is detected.
-  - Presents clear distinction between "Same Mac" (reconnect & resume) and "New Mac" (restore or adopt).
-- **Segmented Views**:
-  - **Backup View**: Hierarchical tree explorer, file preview, live throughput (MB/s), ETA, progress bar with instant Cancel, and source folder pickers.
-  - **Restore View**: Destination picker, Mac SSD free space indicator, conflict policy menu, one-click "Restore All to This Mac", and "Restore Checked" with pre-restore space verification.
-  - **Orphan Cleanup View**: Reclaimable space header badge, dedicated filter for orphaned items and versioned archives, individual/batch "Recover to Mac", and protected deletion.
-- **Migration Assistant Banner**: Displayed prominently whenever a drive from another Mac is connected, featuring 1-click **Auto-Link Folders**, **Restore**, and **Pair Drive**.
-- **Sidebar**: Real-time status badge, visual storage usage bar (used/free), volume path, eject button, drive management menu, and 1-click "Set Up [Drive]" button when discovered drives are awaiting configuration.
+  - Displays Last Backup timestamp, New Files count, Modified Files count, Total item count, version string (`v2.3.0`), and dedication (*"Made for my Love - DG"*).
 
 ---
 
 ## 3. Data Safety & Integrity Model
 
-| Failure Mode | Mitigation in MacBackup v2.2.1 |
+| Failure Mode | Mitigation in MacBackup v2.3.0 |
 | :--- | :--- |
+| **Inflexible Restore Destination** | Source-to-Destination folder mapping allows mapping each backup folder to custom locations. |
+| **Hidden Restore Selection** | Dual-mode restore UI (Folder Mappings + Selective File Tree with search) directly in Restore tab. |
 | **New Mac / Reinstalled Mac Setup Confusion** | Automated `/Volumes/*` scanner detects backup containers and prompts with guided Setup Assistant sheet. |
 | **Status Bar Hidden on Tab Navigation** | `GlobalStatusFooterView` moved to root `NavigationSplitView detail:`, remaining permanently visible across all tabs. |
-| **Confusing "Drive Connected (Unregistered)" Text** | Disambiguated into "No Drive Configured" vs "Unregistered Drive Connected" with clear discovery actions. |
 | **Infinite Hashing Loop (DoS)** | `hashFile` checks `!data.isEmpty` on `FileHandle.read` EOF. |
 | **Path Traversal / Name Collision** | `PathSecurity.relativeSubpath` canonical prefix stripping. |
 | **Arbitrary File Deletion** | `PathSecurity.isSubpath` enforces strict boundary inside target folder. |

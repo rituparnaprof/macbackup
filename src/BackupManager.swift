@@ -138,6 +138,35 @@ public struct DiscoveredBackup: Identifiable, Sendable {
     }
 }
 
+public struct FolderRestoreMapping: Identifiable, Equatable, Sendable {
+    public var id: String { sourceFolderURL.path }
+    public let folderName: String
+    public let sourceFolderURL: URL
+    public var destinationURL: URL
+    public var isSelected: Bool
+    public var totalSize: Int64
+    public var fileCount: Int
+    public var originalPath: String?
+
+    public init(
+        folderName: String,
+        sourceFolderURL: URL,
+        destinationURL: URL,
+        isSelected: Bool = true,
+        totalSize: Int64 = 0,
+        fileCount: Int = 0,
+        originalPath: String? = nil
+    ) {
+        self.folderName = folderName
+        self.sourceFolderURL = sourceFolderURL
+        self.destinationURL = destinationURL
+        self.isSelected = isSelected
+        self.totalSize = totalSize
+        self.fileCount = fileCount
+        self.originalPath = originalPath
+    }
+}
+
 public class BackupManager: ObservableObject {
     @Published public var sourceFolders: [URL] = []
     @Published public var targetFolder: URL?
@@ -178,6 +207,8 @@ public class BackupManager: ObservableObject {
     @Published public var restoreStatus = ""
     @Published public var restoreProgress: Double = 0.0
     @Published public var restoredFilesCount: Int = 0
+    @Published public var restoreFolderMappings: [FolderRestoreMapping] = []
+    @Published public var restoreCheckedNodes: Set<String> = []
 
     // Real-Time Transfer Metrics & Cancellation
     @Published public var currentFileName: String = ""
@@ -485,6 +516,16 @@ public class BackupManager: ObservableObject {
             calculateSyncStatus()
             calculateStorageMetrics()
         }
+    }
+
+    public func selectBackupFolder(_ url: URL) {
+        targetFolder = url
+        savedTargetFolderPath = url.path
+        if let uuid = try? url.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString {
+            registeredDriveUUID = uuid
+        }
+        isDriveConnected = true
+        inspectTargetFolder(url)
     }
 
     public func deregisterFromThisMac() {
@@ -979,6 +1020,257 @@ public class BackupManager: ObservableObject {
         }
     }
 
+    // MARK: - Folder-Mapped Restore
+
+    public func refreshRestoreFolderMappings() {
+        guard let target = targetFolder else {
+            DispatchQueue.main.async {
+                self.restoreFolderMappings = []
+            }
+            return
+        }
+        let home = fileManager.homeDirectoryForCurrentUser
+        let rootFolders = targetNodes.filter { $0.isDirectory && $0.name != ManifestManager.manifestDirectoryName }
+        let rootFiles = targetNodes.filter { !$0.isDirectory && $0.name != ManifestManager.manifestFileName }
+        
+        var newMappings: [FolderRestoreMapping] = []
+        for node in rootFolders {
+            let folderName = node.name
+            let manifestSource = currentManifest?.sources.first(where: { $0.folderName == folderName })
+            let originalPath = manifestSource?.lastKnownPath
+            
+            let existing = restoreFolderMappings.first(where: { $0.id == node.url.path })
+            let dest: URL
+            let selected: Bool
+            if let existing = existing {
+                dest = existing.destinationURL
+                selected = existing.isSelected
+            } else {
+                if let relHome = manifestSource?.relativeHomePath, !relHome.isEmpty {
+                    dest = home.appendingPathComponent(relHome)
+                } else {
+                    dest = home.appendingPathComponent(folderName)
+                }
+                selected = true
+            }
+            
+            let flat = flattenNodes([node]).filter { !$0.isDirectory }
+            let totalBytes = flat.reduce(0) { $0 + $1.size }
+            let fileCount = flat.count
+            
+            newMappings.append(FolderRestoreMapping(
+                folderName: folderName,
+                sourceFolderURL: node.url,
+                destinationURL: dest,
+                isSelected: selected,
+                totalSize: totalBytes,
+                fileCount: fileCount,
+                originalPath: originalPath
+            ))
+        }
+        
+        if !rootFiles.isEmpty {
+            let existing = restoreFolderMappings.first(where: { $0.id == target.path })
+            let dest = existing?.destinationURL ?? home.appendingPathComponent("Restored_Root_Files")
+            let selected = existing?.isSelected ?? true
+            let totalBytes = rootFiles.reduce(0) { $0 + $1.size }
+            newMappings.append(FolderRestoreMapping(
+                folderName: "Root Files",
+                sourceFolderURL: target,
+                destinationURL: dest,
+                isSelected: selected,
+                totalSize: totalBytes,
+                fileCount: rootFiles.count,
+                originalPath: target.path
+            ))
+        }
+        
+        DispatchQueue.main.async {
+            self.restoreFolderMappings = newMappings
+        }
+    }
+
+    public func autoMapRestoreDestinationsToStandardFolders() {
+        let home = fileManager.homeDirectoryForCurrentUser
+        for i in 0..<restoreFolderMappings.count {
+            let folderName = restoreFolderMappings[i].folderName
+            let manifestSource = currentManifest?.sources.first(where: { $0.folderName == folderName })
+            if let relHome = manifestSource?.relativeHomePath, !relHome.isEmpty {
+                restoreFolderMappings[i].destinationURL = home.appendingPathComponent(relHome)
+            } else {
+                restoreFolderMappings[i].destinationURL = home.appendingPathComponent(folderName)
+            }
+        }
+    }
+
+    public func setCommonRestoreDestination(_ commonParent: URL) {
+        for i in 0..<restoreFolderMappings.count {
+            if restoreFolderMappings[i].isSelected {
+                restoreFolderMappings[i].destinationURL = commonParent.appendingPathComponent(restoreFolderMappings[i].folderName)
+            }
+        }
+    }
+
+    public func selectAllRestoreMappings(_ select: Bool) {
+        for i in 0..<restoreFolderMappings.count {
+            restoreFolderMappings[i].isSelected = select
+        }
+    }
+
+    public func performMappedRestore(mappings: [FolderRestoreMapping], conflictPolicy: ConflictPolicy = .keepBoth) {
+        guard let target = targetFolder else { return }
+        guard !isRestoring && !isBackingUp else { return }
+        
+        let activeMappings = mappings.filter { $0.isSelected }
+        guard !activeMappings.isEmpty else { return }
+        
+        isRestoring = true
+        isCancelRequested = false
+        restoreStatus = "Starting mapped restore..."
+        restoredFilesCount = 0
+        restoreProgress = 0.0
+        totalBytesTransferred = 0
+        transferRateFormatted = ""
+        estimatedTimeRemainingFormatted = ""
+        
+        let totalBytes = activeMappings.reduce(0) { $0 + $1.totalSize }
+        totalBytesToTransfer = totalBytes
+        
+        let token = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "Running Mapped Restore")
+        
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            
+            defer {
+                ProcessInfo.processInfo.endActivity(token)
+            }
+            
+            let startTime = Date()
+            
+            do {
+                for mapping in activeMappings {
+                    if self.isCancelRequested {
+                        throw NSError(domain: "RestoreEngine", code: 99, userInfo: [NSLocalizedDescriptionKey: "Restore cancelled by user."])
+                    }
+                    
+                    if !self.fileManager.fileExists(atPath: mapping.destinationURL.path) {
+                        try self.fileManager.createDirectory(at: mapping.destinationURL, withIntermediateDirectories: true, attributes: nil)
+                    }
+                    
+                    if mapping.sourceFolderURL == target {
+                        let rootFiles = self.targetNodes.filter { !$0.isDirectory }
+                        for f in rootFiles {
+                            if self.isCancelRequested {
+                                throw NSError(domain: "RestoreEngine", code: 99, userInfo: [NSLocalizedDescriptionKey: "Restore cancelled by user."])
+                            }
+                            let dest = mapping.destinationURL.appendingPathComponent(f.name)
+                            try self.safeRestoreAndVerify(source: f.url, target: dest, conflictPolicy: conflictPolicy) { bytes in
+                                self.updateTransferMetrics(bytesCopied: bytes, startTime: startTime)
+                            }
+                            DispatchQueue.main.async {
+                                self.restoredFilesCount += 1
+                                if self.totalBytesToTransfer > 0 {
+                                    self.restoreProgress = min(1.0, Double(self.totalBytesTransferred) / Double(self.totalBytesToTransfer))
+                                }
+                            }
+                        }
+                    } else if let rootNode = self.targetNodes.first(where: { $0.url == mapping.sourceFolderURL }) {
+                        try self.restoreFolderMappingRecursively(rootNode, sourceRoot: mapping.sourceFolderURL, destinationRoot: mapping.destinationURL, conflictPolicy: conflictPolicy, startTime: startTime)
+                    } else {
+                        try self.restoreDirectoryFromDisk(sourceDir: mapping.sourceFolderURL, destinationDir: mapping.destinationURL, conflictPolicy: conflictPolicy, startTime: startTime)
+                    }
+                }
+                
+                DispatchQueue.main.async {
+                    self.restoreStatus = "Restore completed successfully! \(self.restoredFilesCount) files restored."
+                    self.isRestoring = false
+                    self.restoreProgress = 1.0
+                    self.currentFileName = ""
+                    self.transferRateFormatted = ""
+                    self.estimatedTimeRemainingFormatted = ""
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.restoreStatus = error.localizedDescription.contains("cancelled") ? "Restore cancelled by user." : "Restore Failed: \(error.localizedDescription)"
+                    self.isRestoring = false
+                    self.currentFileName = ""
+                    self.transferRateFormatted = ""
+                    self.estimatedTimeRemainingFormatted = ""
+                }
+            }
+        }
+    }
+
+    private func restoreFolderMappingRecursively(_ node: FileSystemNode, sourceRoot: URL, destinationRoot: URL, conflictPolicy: ConflictPolicy, startTime: Date) throws {
+        if isCancelRequested {
+            throw NSError(domain: "RestoreEngine", code: 99, userInfo: [NSLocalizedDescriptionKey: "Restore cancelled by user."])
+        }
+        
+        if node.isDirectory {
+            if let children = node.children {
+                for child in children {
+                    try restoreFolderMappingRecursively(child, sourceRoot: sourceRoot, destinationRoot: destinationRoot, conflictPolicy: conflictPolicy, startTime: startTime)
+                }
+            }
+        } else {
+            guard let relativePath = PathSecurity.relativeSubpath(of: node.url, relativeTo: sourceRoot) else {
+                return
+            }
+            let destURL = destinationRoot.appendingPathComponent(relativePath)
+            
+            DispatchQueue.main.async {
+                self.currentFileName = node.name
+                self.restoreStatus = "Restoring \(node.name)..."
+            }
+            
+            try safeRestoreAndVerify(source: node.url, target: destURL, conflictPolicy: conflictPolicy) { bytesRestored in
+                self.updateTransferMetrics(bytesCopied: bytesRestored, startTime: startTime)
+            }
+            
+            DispatchQueue.main.async {
+                self.restoredFilesCount += 1
+                if self.totalBytesToTransfer > 0 {
+                    self.restoreProgress = min(1.0, Double(self.totalBytesTransferred) / Double(self.totalBytesToTransfer))
+                }
+            }
+        }
+    }
+
+    private func restoreDirectoryFromDisk(sourceDir: URL, destinationDir: URL, conflictPolicy: ConflictPolicy, startTime: Date) throws {
+        let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey, .isSymbolicLinkKey]
+        let enumerator = fileManager.enumerator(at: sourceDir, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles, .skipsPackageDescendants])
+        
+        while let fileURL = enumerator?.nextObject() as? URL {
+            if isCancelRequested {
+                throw NSError(domain: "RestoreEngine", code: 99, userInfo: [NSLocalizedDescriptionKey: "Restore cancelled by user."])
+            }
+            let vals = try? fileURL.resourceValues(forKeys: Set(keys))
+            if vals?.isSymbolicLink == true || vals?.isDirectory == true {
+                continue
+            }
+            guard let relativePath = PathSecurity.relativeSubpath(of: fileURL, relativeTo: sourceDir) else {
+                continue
+            }
+            let destURL = destinationDir.appendingPathComponent(relativePath)
+            
+            DispatchQueue.main.async {
+                self.currentFileName = fileURL.lastPathComponent
+                self.restoreStatus = "Restoring \(fileURL.lastPathComponent)..."
+            }
+            
+            try safeRestoreAndVerify(source: fileURL, target: destURL, conflictPolicy: conflictPolicy) { bytesRestored in
+                self.updateTransferMetrics(bytesCopied: bytesRestored, startTime: startTime)
+            }
+            
+            DispatchQueue.main.async {
+                self.restoredFilesCount += 1
+                if self.totalBytesToTransfer > 0 {
+                    self.restoreProgress = min(1.0, Double(self.totalBytesTransferred) / Double(self.totalBytesToTransfer))
+                }
+            }
+        }
+    }
+
     public func canRestore(bytesNeeded: Int64) -> (allowed: Bool, neededFormatted: String, freeFormatted: String) {
         let free = storageMetrics.macSSDFreeSpace
         let allowed = bytesNeeded <= free
@@ -1039,7 +1331,7 @@ public class BackupManager: ObservableObject {
     }
 
     public func performSelectiveRestore(nodes: [FileSystemNode], destinationURL: URL, conflictPolicy: ConflictPolicy = .keepBoth) {
-        guard let target = targetFolder else { return }
+        guard targetFolder != nil else { return }
         guard !isRestoring && !isBackingUp else { return }
         
         isRestoring = true
@@ -1068,7 +1360,8 @@ public class BackupManager: ObservableObject {
             do {
                 for node in nodes {
                     if node.isDirectory {
-                        try self.restoreNodeRecursively(node, relativeToBase: target, destinationBase: destinationURL, conflictPolicy: conflictPolicy, startTime: startTime)
+                        let sourceParent = node.url.deletingLastPathComponent()
+                        try self.restoreFolderMappingRecursively(node, sourceRoot: sourceParent, destinationRoot: destinationURL, conflictPolicy: conflictPolicy, startTime: startTime)
                     } else {
                         if self.isCancelRequested {
                             throw NSError(domain: "RestoreEngine", code: 99, userInfo: [NSLocalizedDescriptionKey: "Restore cancelled by user."])
@@ -1175,6 +1468,7 @@ public class BackupManager: ObservableObject {
                 self.allVersionedArchives = versionArchives
                 self.orphanSafetyLocked = isLocked
                 self.calculateStorageMetrics()
+                self.refreshRestoreFolderMappings()
             }
         }
     }

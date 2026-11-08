@@ -525,198 +525,780 @@ struct BackupDetailView: View {
 
 // MARK: - Restore Detail View
 
+enum RestoreTabMode: String, CaseIterable, Identifiable {
+    case folderMapping = "Folder Mappings"
+    case selectiveBrowser = "Browse & Selective Files"
+    var id: String { rawValue }
+}
+
 struct RestoreDetailView: View {
     @EnvironmentObject var backupManager: BackupManager
-    @State private var restoreDestination: URL = FileManager.default.homeDirectoryForCurrentUser
+    @State private var restoreMode: RestoreTabMode = .folderMapping
     @State private var conflictPolicy: ConflictPolicy = .keepBoth
-    @State private var showingFullRestoreConfirm = false
+    @State private var selectiveDestination: URL = FileManager.default.homeDirectoryForCurrentUser
+    @State private var selectedRestoreNodeID: String?
+    @State private var searchFilter: String = ""
+    @State private var showingMappedRestoreConfirm = false
     @State private var showingSelectiveRestoreConfirm = false
     @State private var showingInsufficientSpaceAlert = false
     @State private var spaceAlertMessage = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text("Data Recovery & Restore")
-                .font(.title2)
-                .bold()
-                .padding(.horizontal)
-                .padding(.top)
-            
-            // Configuration Box
-            VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Text("Restore Destination")
-                        .font(.headline)
-                    Spacer()
-                    if backupManager.storageMetrics.macSSDFreeSpace > 0 {
-                        Text("Mac SSD Free: \(backupManager.storageMetrics.macSSDFreeSpace.formattedBytes)")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                
-                HStack {
-                    Image(systemName: "folder")
-                    Text(restoreDestination.path)
+        VStack(alignment: .leading, spacing: 0) {
+            // Header
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Data Recovery & Restore")
+                        .font(.title2)
+                        .bold()
+                    Text("Select source backup folders and map where each folder should be restored on this Mac.")
                         .font(.caption)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer()
-                    Button("Change Destination...") {
-                        chooseCustomDestination()
-                    }
+                        .foregroundColor(.secondary)
                 }
-                .padding(10)
-                .background(Color.secondary.opacity(0.08))
-                .cornerRadius(8)
+                Spacer()
                 
-                Picker("Conflict Policy:", selection: $conflictPolicy) {
-                    ForEach(ConflictPolicy.allCases) { policy in
-                        Text(policy.rawValue).tag(policy)
+                if backupManager.targetFolder != nil {
+                    Button(action: {
+                        chooseBackupFolder()
+                    }) {
+                        Label("Switch Backup...", systemImage: "arrow.triangle.2.circlepath")
                     }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
-                .pickerStyle(.menu)
             }
-            .padding()
-            .background(Color(NSColor.controlBackgroundColor))
-            .cornerRadius(10)
-            .padding(.horizontal)
-            
-            // Actions
-            HStack(spacing: 16) {
-                Button(action: {
-                    let needed = backupManager.storageMetrics.activeBackupSize
-                    let check = backupManager.canRestore(bytesNeeded: needed)
-                    if !check.allowed && needed > 0 {
-                        spaceAlertMessage = "Restore requires approximately \(check.neededFormatted), but your Mac SSD only has \(check.freeFormatted) available (with 1 GB safety buffer)."
-                        showingInsufficientSpaceAlert = true
-                    } else {
-                        showingFullRestoreConfirm = true
-                    }
-                }) {
-                    Label("Restore All to This Mac", systemImage: "arrow.down.doc.fill")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(backupManager.targetNodes.isEmpty || backupManager.isRestoring)
-                
-                Button(action: {
-                    let nodes = backupManager.checkedNodes.compactMap { backupManager.findNode(by: $0) }
-                    let needed = nodes.reduce(0) { $0 + $1.size }
-                    let check = backupManager.canRestore(bytesNeeded: needed)
-                    if !check.allowed && needed > 0 {
-                        spaceAlertMessage = "Restore requires approximately \(check.neededFormatted), but your Mac SSD only has \(check.freeFormatted) available (with 1 GB safety buffer)."
-                        showingInsufficientSpaceAlert = true
-                    } else {
-                        showingSelectiveRestoreConfirm = true
-                    }
-                }) {
-                    Label("Restore Checked (\(backupManager.checkedNodes.count))", systemImage: "checkmark.circle")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .disabled(backupManager.checkedNodes.isEmpty || backupManager.isRestoring)
-            }
-            .padding(.horizontal)
-            
-            // Status and Progress
-            if backupManager.isRestoring {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Restoring Files...")
-                            .font(.subheadline)
-                            .bold()
-                        Spacer()
-                        if !backupManager.transferRateFormatted.isEmpty {
-                            Text(backupManager.transferRateFormatted)
-                                .font(.caption)
-                                .bold()
-                                .foregroundColor(.blue)
-                        }
-                        if !backupManager.estimatedTimeRemainingFormatted.isEmpty {
-                            Text("ETA: \(backupManager.estimatedTimeRemainingFormatted)")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        Button("Cancel", role: .destructive) {
-                            backupManager.cancelTransfer()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
-                    ProgressView(value: backupManager.restoreProgress)
-                    if !backupManager.currentFileName.isEmpty {
-                        Text(backupManager.currentFileName)
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                }
-                .padding()
-                .background(Color.accentColor.opacity(0.08))
-                .cornerRadius(8)
-                .padding(.horizontal)
-            } else if !backupManager.restoreStatus.isEmpty {
-                Text(backupManager.restoreStatus)
-                    .font(.caption)
-                    .foregroundColor(backupManager.restoreStatus.contains("Failed") ? .red : .green)
-                    .padding(.horizontal)
-            }
+            .padding(.horizontal, 16)
+            .padding(.top, 16)
+            .padding(.bottom, 12)
             
             Divider()
             
-            // Instructions
-            VStack(alignment: .leading, spacing: 6) {
-                Text("How Restore Works:")
-                    .font(.subheadline)
-                    .bold()
-                Text("• Files are verified with SHA-256 cryptographic checksums before write.")
-                    .font(.caption).foregroundColor(.secondary)
-                Text("• Sleep is disabled during restoration to prevent partial writes.")
-                    .font(.caption).foregroundColor(.secondary)
-                Text("• 'Keep Both' saves collisions with a '(Restored)' tag to prevent overwriting existing work.")
-                    .font(.caption).foregroundColor(.secondary)
+            if backupManager.targetFolder == nil {
+                // Empty state when no target folder is set
+                RestoreEmptyStateView()
+            } else {
+                // Active Restore Interface
+                VStack(spacing: 0) {
+                    // Backup Source Card
+                    RestoreSourceHeaderView()
+                        .padding(.horizontal, 16)
+                        .padding(.top, 12)
+                    
+                    // Live Transfer Progress Banner (if active)
+                    if backupManager.isRestoring {
+                        RestoreProgressBannerView()
+                            .padding(.horizontal, 16)
+                            .padding(.top, 10)
+                    } else if !backupManager.restoreStatus.isEmpty {
+                        HStack {
+                            Image(systemName: backupManager.restoreStatus.contains("Failed") ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                                .foregroundColor(backupManager.restoreStatus.contains("Failed") ? .red : .green)
+                            Text(backupManager.restoreStatus)
+                                .font(.caption)
+                                .foregroundColor(backupManager.restoreStatus.contains("Failed") ? .red : .green)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 8)
+                    }
+                    
+                    // Mode Picker
+                    Picker("Restore Mode", selection: $restoreMode) {
+                        ForEach(RestoreTabMode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+                    .padding(.bottom, 8)
+                    
+                    // Main Mode Content
+                    if restoreMode == .folderMapping {
+                        FolderMappingRestoreView(
+                            conflictPolicy: $conflictPolicy,
+                            showingMappedRestoreConfirm: $showingMappedRestoreConfirm,
+                            showingInsufficientSpaceAlert: $showingInsufficientSpaceAlert,
+                            spaceAlertMessage: $spaceAlertMessage
+                        )
+                    } else {
+                        SelectiveFileRestoreView(
+                            selectiveDestination: $selectiveDestination,
+                            conflictPolicy: $conflictPolicy,
+                            selectedRestoreNodeID: $selectedRestoreNodeID,
+                            searchFilter: $searchFilter,
+                            showingSelectiveRestoreConfirm: $showingSelectiveRestoreConfirm,
+                            showingInsufficientSpaceAlert: $showingInsufficientSpaceAlert,
+                            spaceAlertMessage: $spaceAlertMessage
+                        )
+                    }
+                }
             }
-            .padding(.horizontal)
-            
-            Spacer()
         }
         .alert("Insufficient Disk Space", isPresented: $showingInsufficientSpaceAlert) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(spaceAlertMessage)
         }
-        .confirmationDialog("Start Full Restore?", isPresented: $showingFullRestoreConfirm) {
-            Button("Restore All Files") {
-                backupManager.performFullRestore(to: restoreDestination, conflictPolicy: conflictPolicy)
+        .confirmationDialog("Confirm Folder Restore Mapping", isPresented: $showingMappedRestoreConfirm) {
+            Button("Start Mapped Restore") {
+                backupManager.performMappedRestore(mappings: backupManager.restoreFolderMappings, conflictPolicy: conflictPolicy)
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("All folders and files from '\(backupManager.targetFolder?.lastPathComponent ?? "Backup")' will be safely copied and verified to '\(restoreDestination.path)'.")
+            let active = backupManager.restoreFolderMappings.filter { $0.isSelected }
+            let summary = active.map { "• \($0.folderName) ➔ \($0.destinationURL.path)" }.joined(separator: "\n")
+            Text("The following \(active.count) folder(s) will be restored:\n\n\(summary)")
         }
-        .confirmationDialog("Restore Checked Files?", isPresented: $showingSelectiveRestoreConfirm) {
-            Button("Restore \(backupManager.checkedNodes.count) Items") {
-                let nodes = backupManager.checkedNodes.compactMap { backupManager.findNode(by: $0) }
-                backupManager.performSelectiveRestore(nodes: nodes, destinationURL: restoreDestination, conflictPolicy: conflictPolicy)
+        .confirmationDialog("Restore Checked Items?", isPresented: $showingSelectiveRestoreConfirm) {
+            Button("Restore \(backupManager.restoreCheckedNodes.count) Items") {
+                let nodes = backupManager.restoreCheckedNodes.compactMap { backupManager.findNode(by: $0) }
+                backupManager.performSelectiveRestore(nodes: nodes, destinationURL: selectiveDestination, conflictPolicy: conflictPolicy)
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Selected items will be copied and verified to '\(restoreDestination.path)'.")
+            Text("Selected \(backupManager.restoreCheckedNodes.count) item(s) will be restored to '\(selectiveDestination.path)'.")
+        }
+        .onAppear {
+            if backupManager.restoreFolderMappings.isEmpty {
+                backupManager.refreshRestoreFolderMappings()
+            }
         }
     }
     
-    private func chooseCustomDestination() {
+    private func chooseBackupFolder() {
         let panel = NSOpenPanel()
-        panel.title = "Select Restore Destination"
+        panel.title = "Select Backup Folder or Drive"
+        panel.prompt = "Select"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url {
-            restoreDestination = url
+            backupManager.selectBackupFolder(url)
         }
+    }
+}
+
+// MARK: - Restore Subviews
+
+struct RestoreEmptyStateView: View {
+    @EnvironmentObject var backupManager: BackupManager
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Spacer()
+            Image(systemName: "externaldrive.badge.questionmark")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 56, height: 56)
+                .foregroundColor(.secondary.opacity(0.6))
+            
+            Text("No Backup Source Selected")
+                .font(.title2)
+                .bold()
+            
+            Text("Connect your external backup drive, or choose a backup folder on your Mac to restore files.")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
+            
+            Button(action: {
+                let panel = NSOpenPanel()
+                panel.title = "Select Backup Folder or Drive"
+                panel.prompt = "Select"
+                panel.canChooseFiles = false
+                panel.canChooseDirectories = true
+                panel.allowsMultipleSelection = false
+                if panel.runModal() == .OK, let url = panel.url {
+                    backupManager.selectBackupFolder(url)
+                }
+            }) {
+                Label("Choose Backup Folder...", systemImage: "folder.badge.gearshape")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            
+            if !backupManager.discoveredBackups.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Discovered Backups on External Volumes:")
+                        .font(.caption)
+                        .bold()
+                        .foregroundColor(.secondary)
+                        .textCase(.uppercase)
+                    
+                    ForEach(backupManager.discoveredBackups) { discovered in
+                        HStack(spacing: 12) {
+                            Image(systemName: "externaldrive.fill")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 24, height: 24)
+                                .foregroundColor(.blue)
+                            
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(discovered.volumeName)
+                                    .font(.headline)
+                                Text("Origin: \(discovered.manifest.lastBackupMachine.hostname) • \(discovered.manifest.sources.count) folder(s) • Updated \(discovered.manifest.updatedAt.formatted(date: .abbreviated, time: .shortened))")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            
+                            Spacer()
+                            
+                            Button("Restore from This Drive") {
+                                backupManager.prepareRestoreFromDiscoveredBackup(discovered)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                        }
+                        .padding(12)
+                        .background(Color.secondary.opacity(0.06))
+                        .cornerRadius(8)
+                    }
+                }
+                .frame(maxWidth: 540)
+                .padding(.top, 16)
+            }
+            
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+}
+
+struct RestoreSourceHeaderView: View {
+    @EnvironmentObject var backupManager: BackupManager
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 14) {
+            Image(systemName: "externaldrive.fill.badge.checkmark")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 32, height: 32)
+                .foregroundColor(.blue)
+            
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 8) {
+                    Text("BACKUP REPOSITORY:")
+                        .font(.caption2)
+                        .bold()
+                        .foregroundColor(.secondary)
+                    Text(backupManager.targetFolder?.lastPathComponent ?? "Backup")
+                        .font(.headline)
+                    if backupManager.isMigrationMode {
+                        Text("Migration Mode")
+                            .font(.caption2)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.orange.opacity(0.2))
+                            .foregroundColor(.orange)
+                            .cornerRadius(4)
+                    }
+                }
+                
+                if let manifest = backupManager.currentManifest {
+                    Text("Original Mac: \(manifest.lastBackupMachine.hostname) (\(manifest.lastBackupMachine.username)) • Last updated: \(manifest.updatedAt.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    Text(backupManager.targetFolder?.path ?? "")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            
+            Spacer()
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.06))
+        .cornerRadius(8)
+    }
+}
+
+struct RestoreProgressBannerView: View {
+    @EnvironmentObject var backupManager: BackupManager
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Restoring Files...")
+                    .font(.subheadline)
+                    .bold()
+                Spacer()
+                if !backupManager.transferRateFormatted.isEmpty {
+                    Text(backupManager.transferRateFormatted)
+                        .font(.caption)
+                        .bold()
+                        .foregroundColor(.blue)
+                }
+                if !backupManager.estimatedTimeRemainingFormatted.isEmpty {
+                    Text(backupManager.estimatedTimeRemainingFormatted)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Button("Cancel", role: .destructive) {
+                    backupManager.cancelTransfer()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            
+            ProgressView(value: backupManager.restoreProgress)
+            
+            if !backupManager.currentFileName.isEmpty {
+                Text(backupManager.currentFileName)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        .padding(10)
+        .background(Color.accentColor.opacity(0.08))
+        .cornerRadius(8)
+    }
+}
+
+struct FolderMappingRestoreView: View {
+    @EnvironmentObject var backupManager: BackupManager
+    @Binding var conflictPolicy: ConflictPolicy
+    @Binding var showingMappedRestoreConfirm: Bool
+    @Binding var showingInsufficientSpaceAlert: Bool
+    @Binding var spaceAlertMessage: String
+
+    var body: some View {
+        VStack(spacing: 8) {
+            // Quick Batch Actions Bar
+            HStack(spacing: 12) {
+                Button("Select All") {
+                    backupManager.selectAllRestoreMappings(true)
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+                
+                Button("Deselect All") {
+                    backupManager.selectAllRestoreMappings(false)
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+                
+                Spacer()
+                
+                Button(action: {
+                    backupManager.autoMapRestoreDestinationsToStandardFolders()
+                }) {
+                    Label("Auto-Map to This Mac", systemImage: "sparkles")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Automatically map to matching standard folders (~/Documents, ~/Desktop, etc.) on this Mac")
+                
+                Button(action: {
+                    chooseCommonParentDestination()
+                }) {
+                    Label("Set Common Destination...", systemImage: "folder.badge.plus")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Direct all selected folders into a chosen common destination folder")
+            }
+            .padding(.horizontal, 16)
+            
+            // Scrollable List of Mappings
+            ScrollView {
+                VStack(spacing: 8) {
+                    if backupManager.restoreFolderMappings.isEmpty {
+                        VStack(spacing: 8) {
+                            Text("No folders found in this backup.")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                            Button("Scan Again") {
+                                backupManager.refreshRestoreFolderMappings()
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                        .padding(40)
+                    } else {
+                        ForEach($backupManager.restoreFolderMappings) { $mapping in
+                            FolderMappingRowView(mapping: $mapping)
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 4)
+            }
+            .frame(maxHeight: .infinity)
+            
+            Divider()
+            
+            // Bottom Action Bar
+            HStack(alignment: .center, spacing: 20) {
+                HStack(spacing: 6) {
+                    Text("Conflict:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Picker("", selection: $conflictPolicy) {
+                        ForEach(ConflictPolicy.allCases) { policy in
+                            Text(policy.rawValue).tag(policy)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                }
+                
+                Spacer()
+                
+                let activeMappings = backupManager.restoreFolderMappings.filter { $0.isSelected }
+                let totalBytes = activeMappings.reduce(0) { $0 + $1.totalSize }
+                let freeSSD = backupManager.storageMetrics.macSSDFreeSpace
+                
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("Restore: \(totalBytes.formattedBytes) (\(activeMappings.count) folders)")
+                        .font(.caption)
+                        .bold()
+                    Text("Mac SSD Free: \(freeSSD.formattedBytes)")
+                        .font(.caption2)
+                        .foregroundColor(totalBytes > freeSSD ? .red : .secondary)
+                }
+                
+                Button(action: {
+                    let check = backupManager.canRestore(bytesNeeded: totalBytes)
+                    if !check.allowed && totalBytes > 0 {
+                        spaceAlertMessage = "Restore requires approximately \(check.neededFormatted), but your Mac SSD only has \(check.freeFormatted) available."
+                        showingInsufficientSpaceAlert = true
+                    } else {
+                        showingMappedRestoreConfirm = true
+                    }
+                }) {
+                    Label(
+                        activeMappings.isEmpty ? "Select Folders to Restore" : "Restore \(activeMappings.count) Selected Folder\(activeMappings.count == 1 ? "" : "s")",
+                        systemImage: "arrow.down.doc.fill"
+                    )
+                    .bold()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(activeMappings.isEmpty || backupManager.isRestoring)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Color(NSColor.controlBackgroundColor))
+        }
+    }
+    
+    private func chooseCommonParentDestination() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Common Destination Folder"
+        panel.prompt = "Select"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url {
+            backupManager.setCommonRestoreDestination(url)
+        }
+    }
+}
+
+struct FolderMappingRowView: View {
+    @Binding var mapping: FolderRestoreMapping
+    let home = FileManager.default.homeDirectoryForCurrentUser
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Toggle("", isOn: $mapping.isSelected)
+                .labelsHidden()
+            
+            Image(systemName: "folder.fill")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 26, height: 26)
+                .foregroundColor(.blue)
+            
+            // Source Info
+            VStack(alignment: .leading, spacing: 2) {
+                Text(mapping.folderName)
+                    .font(.headline)
+                    .lineLimit(1)
+                
+                HStack(spacing: 6) {
+                    Text(mapping.totalSize.formattedBytes)
+                        .font(.caption)
+                        .bold()
+                    Text("•")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text("\(mapping.fileCount) files")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                if let orig = mapping.originalPath, !orig.isEmpty {
+                    Text("From: \(orig)")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            .frame(width: 170, alignment: .leading)
+            
+            Image(systemName: "arrow.right")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+            
+            // Destination Info
+            VStack(alignment: .leading, spacing: 2) {
+                Text("RESTORE DESTINATION:")
+                    .font(.system(size: 9))
+                    .bold()
+                    .foregroundColor(.secondary)
+                
+                HStack(spacing: 6) {
+                    Image(systemName: "folder")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text(formatPath(mapping.destinationURL))
+                        .font(.caption)
+                        .bold()
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            
+            Spacer()
+            
+            Button("Change...") {
+                chooseCustomDestination()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            
+            Button(action: {
+                resetDefaultDestination()
+            }) {
+                Image(systemName: "arrow.counterclockwise")
+            }
+            .buttonStyle(.borderless)
+            .help("Reset to ~/\(mapping.folderName)")
+        }
+        .padding(10)
+        .background(mapping.isSelected ? Color.blue.opacity(0.06) : Color.secondary.opacity(0.04))
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(mapping.isSelected ? Color.blue.opacity(0.25) : Color.secondary.opacity(0.12), lineWidth: 1)
+        )
+    }
+
+    private func formatPath(_ url: URL) -> String {
+        let homePath = home.path
+        if url.path == homePath {
+            return "~"
+        } else if url.path.hasPrefix(homePath + "/") {
+            return "~" + url.path.dropFirst(homePath.count)
+        }
+        return url.path
+    }
+
+    private func chooseCustomDestination() {
+        let panel = NSOpenPanel()
+        panel.title = "Select Destination for '\(mapping.folderName)'"
+        panel.prompt = "Select"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = mapping.destinationURL
+        if panel.runModal() == .OK, let url = panel.url {
+            mapping.destinationURL = url
+        }
+    }
+
+    private func resetDefaultDestination() {
+        mapping.destinationURL = home.appendingPathComponent(mapping.folderName)
+    }
+}
+
+struct SelectiveFileRestoreView: View {
+    @EnvironmentObject var backupManager: BackupManager
+    @Binding var selectiveDestination: URL
+    @Binding var conflictPolicy: ConflictPolicy
+    @Binding var selectedRestoreNodeID: String?
+    @Binding var searchFilter: String
+    @Binding var showingSelectiveRestoreConfirm: Bool
+    @Binding var showingInsufficientSpaceAlert: Bool
+    @Binding var spaceAlertMessage: String
+
+    var filteredNodes: [FileSystemNode] {
+        if searchFilter.trimmingCharacters(in: .whitespaces).isEmpty {
+            return backupManager.targetNodes.filter { $0.name != ManifestManager.manifestDirectoryName }
+        }
+        return backupManager.targetNodes.filter { $0.name != ManifestManager.manifestDirectoryName }.compactMap { filterNode($0, query: searchFilter) }
+    }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            // Destination Box
+            HStack {
+                Text("Restore Checked Items To:")
+                    .font(.caption)
+                    .bold()
+                    .foregroundColor(.secondary)
+                    .textCase(.uppercase)
+                
+                Image(systemName: "folder")
+                    .foregroundColor(.secondary)
+                Text(selectiveDestination.path)
+                    .font(.caption)
+                    .bold()
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                
+                Spacer()
+                
+                Button("Change Destination...") {
+                    let panel = NSOpenPanel()
+                    panel.title = "Select Restore Destination"
+                    panel.prompt = "Select"
+                    panel.canChooseFiles = false
+                    panel.canChooseDirectories = true
+                    panel.canCreateDirectories = true
+                    panel.allowsMultipleSelection = false
+                    if panel.runModal() == .OK, let url = panel.url {
+                        selectiveDestination = url
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            .padding(10)
+            .background(Color.secondary.opacity(0.06))
+            .cornerRadius(8)
+            .padding(.horizontal, 16)
+            
+            // Search / filter bar
+            HStack {
+                Image(systemName: "magnifyingglass")
+                    .foregroundColor(.secondary)
+                TextField("Search files and folders in backup...", text: $searchFilter)
+                    .textFieldStyle(.plain)
+                if !searchFilter.isEmpty {
+                    Button(action: { searchFilter = "" }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(6)
+            .background(Color.secondary.opacity(0.06))
+            .cornerRadius(6)
+            .padding(.horizontal, 16)
+            
+            // Tree List
+            List(filteredNodes, children: \.children, selection: $selectedRestoreNodeID) { node in
+                HStack {
+                    Toggle("", isOn: Binding(
+                        get: { backupManager.restoreCheckedNodes.contains(node.id) },
+                        set: { isChecked in
+                            if isChecked {
+                                backupManager.restoreCheckedNodes.insert(node.id)
+                            } else {
+                                backupManager.restoreCheckedNodes.remove(node.id)
+                            }
+                        }
+                    ))
+                    .labelsHidden()
+                    .buttonStyle(PlainButtonStyle())
+                    
+                    Image(nsImage: NSWorkspace.shared.icon(forFile: node.url.path))
+                        .resizable()
+                        .frame(width: 16, height: 16)
+                    
+                    Text(node.name)
+                    
+                    Spacer(minLength: 20)
+                    
+                    if !node.isDirectory {
+                        Text(node.size.formattedBytes)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .listStyle(.inset(alternatesRowBackgrounds: true))
+            .frame(maxHeight: .infinity)
+            .padding(.horizontal, 16)
+            
+            Divider()
+            
+            // Selective Restore Bottom Bar
+            let checkedCount = backupManager.restoreCheckedNodes.count
+            let checkedNodes = backupManager.restoreCheckedNodes.compactMap { backupManager.findNode(by: $0) }
+            let checkedBytes = checkedNodes.reduce(0) { $0 + $1.size }
+            let freeSSD = backupManager.storageMetrics.macSSDFreeSpace
+            
+            HStack(alignment: .center, spacing: 16) {
+                Button("Clear Checked") {
+                    backupManager.restoreCheckedNodes.removeAll()
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+                .disabled(checkedCount == 0)
+                
+                Spacer()
+                
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("\(checkedCount) item\(checkedCount == 1 ? "" : "s") selected (\(checkedBytes.formattedBytes))")
+                        .font(.caption)
+                        .bold()
+                    Text("Mac SSD Free: \(freeSSD.formattedBytes)")
+                        .font(.caption2)
+                        .foregroundColor(checkedBytes > freeSSD ? .red : .secondary)
+                }
+                
+                Button(action: {
+                    let check = backupManager.canRestore(bytesNeeded: checkedBytes)
+                    if !check.allowed && checkedBytes > 0 {
+                        spaceAlertMessage = "Restore requires approximately \(check.neededFormatted), but your Mac SSD only has \(check.freeFormatted) available."
+                        showingInsufficientSpaceAlert = true
+                    } else {
+                        showingSelectiveRestoreConfirm = true
+                    }
+                }) {
+                    Label(
+                        checkedCount == 0 ? "Select Items to Restore" : "Restore \(checkedCount) Item\(checkedCount == 1 ? "" : "s")",
+                        systemImage: "checkmark.circle.fill"
+                    )
+                    .bold()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(checkedCount == 0 || backupManager.isRestoring)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Color(NSColor.controlBackgroundColor))
+        }
+    }
+    
+    private func filterNode(_ node: FileSystemNode, query: String) -> FileSystemNode? {
+        if node.name.localizedCaseInsensitiveContains(query) {
+            return node
+        }
+        if let children = node.children {
+            let matched = children.compactMap { filterNode($0, query: query) }
+            if !matched.isEmpty {
+                var copy = node
+                copy.children = matched
+                return copy
+            }
+        }
+        return nil
     }
 }
 
@@ -1010,7 +1592,7 @@ struct GlobalStatusFooterView: View {
             Divider().frame(height: 12)
             
             VStack(alignment: .trailing, spacing: 0) {
-                Text("v2.2.1")
+                Text("v2.3.0")
                 Text("Made for my Love - DG").italic()
             }
             .font(.system(size: 9))

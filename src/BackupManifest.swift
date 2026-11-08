@@ -65,7 +65,7 @@ public struct BackupManifest: Codable, Sendable {
     public var sources: [SourceMapping]
 
     public init(
-        version: String = "2.2.1",
+        version: String = "2.3.0",
         backupContainerId: String = UUID().uuidString,
         friendlyName: String,
         createdAt: Date = Date(),

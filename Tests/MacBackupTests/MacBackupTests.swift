@@ -94,7 +94,7 @@ final class MacBackupTests: XCTestCase {
 
     func testHashFileContentDeterminism() throws {
         let file = tempDirectory.appendingPathComponent("hello.txt")
-        let content = "Hello, MacBackup v2.2.1!"
+        let content = "Hello, MacBackup v2.3.0!"
         try content.write(to: file, atomically: true, encoding: .utf8)
 
         let manager = BackupManager()
@@ -121,7 +121,7 @@ final class MacBackupTests: XCTestCase {
 
     func testManifestSaveAndLoad() throws {
         let manifest = BackupManifest(
-            version: "2.2.1",
+            version: "2.3.0",
             friendlyName: "Samsung T7",
             sources: [
                 SourceMapping(folderName: "Documents", relativeHomePath: "Documents", lastKnownPath: "/Users/test/Documents")
@@ -132,7 +132,7 @@ final class MacBackupTests: XCTestCase {
         let loaded = ManifestManager.load(from: tempDirectory)
 
         XCTAssertNotNil(loaded)
-        XCTAssertEqual(loaded?.version, "2.2.1")
+        XCTAssertEqual(loaded?.version, "2.3.0")
         XCTAssertEqual(loaded?.friendlyName, "Samsung T7")
         XCTAssertEqual(loaded?.sources.count, 1)
         XCTAssertEqual(loaded?.sources.first?.folderName, "Documents")
@@ -143,7 +143,7 @@ final class MacBackupTests: XCTestCase {
         // Manifest created with a different machine ID
         let foreignMachine = MachineMetadata(machineId: "FOREIGN_MACHINE_UUID", hostname: "MacBookPro-Other", username: "alex")
         let manifest = BackupManifest(
-            version: "2.2.1",
+            version: "2.3.0",
             friendlyName: "External Drive",
             lastBackupMachine: foreignMachine
         )
@@ -213,6 +213,8 @@ final class MacBackupTests: XCTestCase {
 
     // MARK: - 7. Discovered Backup Model
 
+    // MARK: - 7. Discovered Backup Model
+
     func testDiscoveredBackupStructure() {
         let manifest = BackupManifest(friendlyName: "SanDisk Extreme")
         let backupFolder = tempDirectory.appendingPathComponent("MacBackup")
@@ -230,5 +232,68 @@ final class MacBackupTests: XCTestCase {
         XCTAssertEqual(discovered.volumeName, "ExtremeSSD")
         XCTAssertTrue(discovered.isSameMachine)
         XCTAssertEqual(discovered.manifest.friendlyName, "SanDisk Extreme")
+    }
+
+    // MARK: - 8. Folder Restore Mapping
+
+    func testFolderRestoreMappingStructure() {
+        let sourceURL = tempDirectory.appendingPathComponent("Documents")
+        let destURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents")
+        
+        var mapping = FolderRestoreMapping(
+            folderName: "Documents",
+            sourceFolderURL: sourceURL,
+            destinationURL: destURL,
+            isSelected: true,
+            totalSize: 1048576,
+            fileCount: 42,
+            originalPath: "/Users/test/Documents"
+        )
+
+        XCTAssertEqual(mapping.id, sourceURL.path)
+        XCTAssertEqual(mapping.folderName, "Documents")
+        XCTAssertEqual(mapping.sourceFolderURL, sourceURL)
+        XCTAssertEqual(mapping.destinationURL, destURL)
+        XCTAssertTrue(mapping.isSelected)
+        XCTAssertEqual(mapping.totalSize, 1048576)
+        XCTAssertEqual(mapping.fileCount, 42)
+        XCTAssertEqual(mapping.originalPath, "/Users/test/Documents")
+
+        // Test mutating destination
+        let customDest = tempDirectory.appendingPathComponent("RestoredDocs")
+        mapping.destinationURL = customDest
+        XCTAssertEqual(mapping.destinationURL, customDest)
+
+        // Test toggle selection
+        mapping.isSelected = false
+        XCTAssertFalse(mapping.isSelected)
+    }
+
+    func testFolderRestoreMappingGeneration() throws {
+        // Create simulated backup folders
+        let docsFolder = tempDirectory.appendingPathComponent("Documents")
+        let desktopFolder = tempDirectory.appendingPathComponent("Desktop")
+        try FileManager.default.createDirectory(at: docsFolder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: desktopFolder, withIntermediateDirectories: true)
+
+        let manager = BackupManager()
+        manager.targetFolder = tempDirectory
+        manager.targetNodes = [
+            FileSystemNode(url: docsFolder, name: "Documents", isDirectory: true, modificationDate: Date(), size: 500, isOrphaned: false, isVersionedArchive: false),
+            FileSystemNode(url: desktopFolder, name: "Desktop", isDirectory: true, modificationDate: Date(), size: 300, isOrphaned: false, isVersionedArchive: false)
+        ]
+
+        manager.refreshRestoreFolderMappings()
+
+        // Wait a brief tick for main thread update
+        let expectation = XCTestExpectation(description: "Wait for mappings refresh")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            XCTAssertEqual(manager.restoreFolderMappings.count, 2)
+            let folderNames = Set(manager.restoreFolderMappings.map { $0.folderName })
+            XCTAssertTrue(folderNames.contains("Documents"))
+            XCTAssertTrue(folderNames.contains("Desktop"))
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 2.0)
     }
 }
