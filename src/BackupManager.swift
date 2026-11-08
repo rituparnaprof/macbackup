@@ -121,6 +121,23 @@ public struct StorageMetrics: Sendable {
     }
 }
 
+public struct DiscoveredBackup: Identifiable, Sendable {
+    public var id: String { backupFolderURL.path }
+    public let volumeURL: URL
+    public let backupFolderURL: URL
+    public let manifest: BackupManifest
+    public let isSameMachine: Bool
+    public let volumeName: String
+
+    public init(volumeURL: URL, backupFolderURL: URL, manifest: BackupManifest, isSameMachine: Bool, volumeName: String) {
+        self.volumeURL = volumeURL
+        self.backupFolderURL = backupFolderURL
+        self.manifest = manifest
+        self.isSameMachine = isSameMachine
+        self.volumeName = volumeName
+    }
+}
+
 public class BackupManager: ObservableObject {
     @Published public var sourceFolders: [URL] = []
     @Published public var targetFolder: URL?
@@ -130,6 +147,11 @@ public class BackupManager: ObservableObject {
     @Published public var nodeLookup: [String: FileSystemNode] = [:]
     @Published public var allOrphans: [FileSystemNode] = []
     @Published public var allVersionedArchives: [FileSystemNode] = []
+
+    // Smart Discovery & Setup Assistant
+    @Published public var discoveredBackups: [DiscoveredBackup] = []
+    @Published public var showingSetupAssistant: Bool = false
+    @Published public var activeSetupBackup: DiscoveredBackup? = nil
 
     // Backup State
     @Published public var isBackingUp = false
@@ -236,6 +258,7 @@ public class BackupManager: ObservableObject {
         guard !registeredDriveUUID.isEmpty else {
             isDriveConnected = false
             driveState = .unregistered
+            scanMountedVolumesForBackups()
             return
         }
         
@@ -249,6 +272,7 @@ public class BackupManager: ObservableObject {
             inspectTargetFolder(target)
         } else {
             driveState = .disconnected
+            scanMountedVolumesForBackups()
         }
     }
 
@@ -276,7 +300,8 @@ public class BackupManager: ObservableObject {
     private func handleDriveMount(notification: Notification) {
         guard let volumeURL = notification.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL else { return }
         
-        if let uuid = try? volumeURL.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString, uuid == registeredDriveUUID {
+        let uuid = try? volumeURL.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString
+        if let driveUUID = uuid, !registeredDriveUUID.isEmpty, driveUUID == registeredDriveUUID {
             DispatchQueue.main.async {
                 self.isDriveConnected = true
                 let targetURL = URL(fileURLWithPath: self.savedTargetFolderPath)
@@ -299,7 +324,88 @@ public class BackupManager: ObservableObject {
                     self.showingBackupPrompt = true
                 }
             }
+        } else {
+            scanMountedVolumesForBackups()
         }
+    }
+
+    // MARK: - Smart Volume Discovery & Setup Assistant
+
+    public func scanMountedVolumesForBackups() {
+        let keys: [URLResourceKey] = [.volumeNameKey, .volumeUUIDStringKey, .volumeIsInternalKey, .volumeIsRemovableKey]
+        let mountedVolumes = fileManager.mountedVolumeURLs(includingResourceValuesForKeys: keys, options: [.skipHiddenVolumes]) ?? []
+        
+        var discovered: [DiscoveredBackup] = []
+        let localMachine = MachineMetadata.current()
+        
+        for volume in mountedVolumes where volume.path != "/" && volume.path.hasPrefix("/Volumes/") {
+            let volumeName = (try? volume.resourceValues(forKeys: [.volumeNameKey]).volumeName) ?? volume.lastPathComponent
+            
+            let candidateFolders = [
+                volume,
+                volume.appendingPathComponent("Backups"),
+                volume.appendingPathComponent("MacBackup")
+            ]
+            
+            for candidate in candidateFolders {
+                if let manifest = ManifestManager.load(from: candidate) {
+                    let isSame = (manifest.lastBackupMachine.machineId == localMachine.machineId) ||
+                                 (manifest.lastBackupMachine.hostname == localMachine.hostname && manifest.lastBackupMachine.username == localMachine.username)
+                    discovered.append(DiscoveredBackup(
+                        volumeURL: volume,
+                        backupFolderURL: candidate,
+                        manifest: manifest,
+                        isSameMachine: isSame,
+                        volumeName: volumeName
+                    ))
+                    break
+                }
+            }
+        }
+        
+        DispatchQueue.main.async {
+            self.discoveredBackups = discovered
+            if self.driveState == .unregistered || self.driveState == .disconnected {
+                if let first = discovered.first {
+                    self.activeSetupBackup = first
+                    self.showingSetupAssistant = true
+                }
+            }
+        }
+    }
+
+    public func reconnectDiscoveredBackup(_ discovered: DiscoveredBackup) {
+        targetFolder = discovered.backupFolderURL
+        savedTargetFolderPath = discovered.backupFolderURL.path
+        if let uuid = try? discovered.volumeURL.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString {
+            registeredDriveUUID = uuid
+        }
+        inspectTargetFolder(discovered.backupFolderURL)
+        if sourceFolders.isEmpty {
+            autoLinkStandardFolders()
+        }
+        showingSetupAssistant = false
+        activeSetupBackup = nil
+        backupStatus = "Reconnected to backup on \(discovered.volumeName)!"
+    }
+
+    public func prepareRestoreFromDiscoveredBackup(_ discovered: DiscoveredBackup) {
+        targetFolder = discovered.backupFolderURL
+        savedTargetFolderPath = discovered.backupFolderURL.path
+        if let uuid = try? discovered.volumeURL.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString {
+            registeredDriveUUID = uuid
+        }
+        inspectTargetFolder(discovered.backupFolderURL)
+        isMigrationMode = true
+        driveState = .pairedOtherMac
+        showingSetupAssistant = false
+        activeSetupBackup = nil
+        backupStatus = "Ready to restore files from \(discovered.manifest.friendlyName)."
+    }
+
+    public func adoptAndPairDiscoveredBackup(_ discovered: DiscoveredBackup) {
+        reconnectDiscoveredBackup(discovered)
+        adoptBackupForThisMac()
     }
     
     private func handleDriveUnmount(notification: Notification) {

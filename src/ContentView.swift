@@ -50,18 +50,31 @@ struct ContentView: View {
                     MigrationBannerView(selectedTab: $selectedTab)
                 }
                 
-                // Tab Content
-                switch selectedTab {
-                case .backup:
-                    BackupDetailView(selectedNodeID: $selectedNodeID)
-                case .restore:
-                    RestoreDetailView()
-                case .orphans:
-                    OrphanCleanupView()
+                // Tab Content (Expands to fill available space)
+                Group {
+                    switch selectedTab {
+                    case .backup:
+                        BackupDetailView(selectedNodeID: $selectedNodeID)
+                    case .restore:
+                        RestoreDetailView()
+                    case .orphans:
+                        OrphanCleanupView()
+                    }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                
+                Divider()
+                
+                // Permanent Global Footer (Always visible across all tabs)
+                GlobalStatusFooterView()
             }
         }
         .navigationTitle("Mac SSD Backup")
+        .sheet(isPresented: $backupManager.showingSetupAssistant) {
+            if let discovered = backupManager.activeSetupBackup {
+                SetupAssistantView(discovered: discovered, selectedTab: $selectedTab)
+            }
+        }
         .alert("Backup Drive Detected", isPresented: $backupManager.showingBackupPrompt) {
             Button("Start Backup") {
                 backupManager.performBackup()
@@ -182,6 +195,18 @@ struct SidebarView: View {
                 
                 Button("Select & Register Target Folder") {
                     backupManager.selectTargetFolder()
+                }
+                
+                if let first = backupManager.discoveredBackups.first, !backupManager.isDriveConnected {
+                    Button(action: {
+                        backupManager.activeSetupBackup = first
+                        backupManager.showingSetupAssistant = true
+                    }) {
+                        Label("Set Up \(first.volumeName)", systemImage: "sparkles")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.green)
                 }
                 
                 HStack(spacing: 6) {
@@ -336,7 +361,8 @@ struct SidebarView: View {
         switch backupManager.driveState {
         case .pairedThisMac: return "Connected & Paired"
         case .pairedOtherMac: return "Migration Mode"
-        case .unregistered: return "Drive Connected (Unregistered)"
+        case .unregistered: 
+            return backupManager.isDriveConnected ? "Unregistered Drive Connected" : "No Drive Configured"
         case .disconnected: return "Drive Disconnected"
         }
     }
@@ -493,48 +519,7 @@ struct BackupDetailView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            
-            Divider()
-            
-            // Stats Footer
-            HStack(spacing: 24) {
-                if let lastDate = backupManager.lastBackupDate {
-                    StatItemView(title: "Last Backup", value: lastDate.formatted(date: .abbreviated, time: .shortened))
-                } else {
-                    StatItemView(title: "Last Backup", value: "Never")
-                }
-                StatItemView(title: "New Files", value: "\(backupManager.newFilesAdded)")
-                StatItemView(title: "Modified Files", value: "\(backupManager.modifiedFilesUpdated)")
-                
-                Spacer()
-                
-                Text("Total Items: \(countItems(in: backupManager.targetNodes))")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                
-                Divider().frame(height: 12)
-                
-                VStack(alignment: .trailing, spacing: 0) {
-                    Text("v2.1.0")
-                    Text("Made for my Love - DG").italic()
-                }
-                .font(.system(size: 9))
-                .foregroundColor(.secondary.opacity(0.8))
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(Color.secondary.opacity(0.06))
         }
-    }
-    
-    private func countItems(in nodes: [FileSystemNode]) -> Int {
-        var count = nodes.count
-        for node in nodes {
-            if let children = node.children {
-                count += countItems(in: children)
-            }
-        }
-        return count
     }
 }
 
@@ -998,5 +983,219 @@ struct StatItemView: View {
                 .font(.subheadline)
                 .bold()
         }
+    }
+}
+
+// MARK: - Global Status Footer View
+
+struct GlobalStatusFooterView: View {
+    @EnvironmentObject var backupManager: BackupManager
+    
+    var body: some View {
+        HStack(spacing: 24) {
+            if let lastDate = backupManager.lastBackupDate {
+                StatItemView(title: "Last Backup", value: lastDate.formatted(date: .abbreviated, time: .shortened))
+            } else {
+                StatItemView(title: "Last Backup", value: "Never")
+            }
+            StatItemView(title: "New Files", value: "\(backupManager.newFilesAdded)")
+            StatItemView(title: "Modified Files", value: "\(backupManager.modifiedFilesUpdated)")
+            
+            Spacer()
+            
+            Text("Total Items: \(countItems(in: backupManager.targetNodes))")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            
+            Divider().frame(height: 12)
+            
+            VStack(alignment: .trailing, spacing: 0) {
+                Text("v2.2.0")
+                Text("Made for my Love - DG").italic()
+            }
+            .font(.system(size: 9))
+            .foregroundColor(.secondary.opacity(0.8))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(Color.secondary.opacity(0.06))
+    }
+    
+    private func countItems(in nodes: [FileSystemNode]) -> Int {
+        var count = nodes.count
+        for node in nodes {
+            if let children = node.children {
+                count += countItems(in: children)
+            }
+        }
+        return count
+    }
+}
+
+// MARK: - Setup Assistant View
+
+struct SetupAssistantView: View {
+    @EnvironmentObject var backupManager: BackupManager
+    let discovered: DiscoveredBackup
+    @Binding var selectedTab: MainTab
+    @Environment(\.dismiss) private var dismiss
+    @State private var showingPairConfirm = false
+
+    var body: some View {
+        VStack(spacing: 20) {
+            HStack(spacing: 16) {
+                Image(systemName: "externaldrive.badge.questionmark")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 44, height: 44)
+                    .foregroundColor(.blue)
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("External Backup Drive Detected")
+                        .font(.title2)
+                        .bold()
+                    Text("Mac Backup found an existing backup repository on '\(discovered.volumeName)'.")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+            }
+            
+            Divider()
+            
+            // Backup Details card
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Original Mac:")
+                        .bold()
+                        .frame(width: 130, alignment: .leading)
+                    Text("\(discovered.manifest.lastBackupMachine.hostname) (\(discovered.manifest.lastBackupMachine.username))")
+                        .foregroundColor(.secondary)
+                }
+                HStack {
+                    Text("Last Backup:")
+                        .bold()
+                        .frame(width: 130, alignment: .leading)
+                    Text(discovered.manifest.updatedAt.formatted(date: .abbreviated, time: .shortened))
+                        .foregroundColor(.secondary)
+                }
+                HStack {
+                    Text("Mapped Folders:")
+                        .bold()
+                        .frame(width: 130, alignment: .leading)
+                    Text("\(discovered.manifest.sources.count) folders configured")
+                        .foregroundColor(.secondary)
+                }
+                HStack {
+                    Text("Repository Path:")
+                        .bold()
+                        .frame(width: 130, alignment: .leading)
+                    Text(discovered.backupFolderURL.path)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .truncationMode(.middle)
+                }
+            }
+            .font(.callout)
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.secondary.opacity(0.08))
+            .cornerRadius(8)
+            
+            Text("Is this Mac the same machine that created this backup, or a new Mac?")
+                .font(.headline)
+                .padding(.top, 4)
+            
+            HStack(spacing: 16) {
+                // Same Mac Option
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .foregroundColor(.blue)
+                        Text("Same Mac")
+                            .font(.headline)
+                    }
+                    Text("Reconnect to this drive and resume regular incremental backups from this machine.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    
+                    Spacer()
+                    
+                    Button(action: {
+                        backupManager.reconnectDiscoveredBackup(discovered)
+                        dismiss()
+                    }) {
+                        Text("Reconnect & Resume")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding()
+                .frame(maxWidth: .infinity, minHeight: 150)
+                .background(Color.blue.opacity(0.06))
+                .cornerRadius(10)
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.blue.opacity(0.2), lineWidth: 1))
+                
+                // New Mac Option
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Image(systemName: "sparkles")
+                            .foregroundColor(.orange)
+                        Text("New Mac")
+                            .font(.headline)
+                    }
+                    Text("Restore data from this backup onto this new machine, or pair this drive to become this Mac's primary backup.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    
+                    Spacer()
+                    
+                    HStack {
+                        Button(action: {
+                            backupManager.prepareRestoreFromDiscoveredBackup(discovered)
+                            selectedTab = .restore
+                            dismiss()
+                        }) {
+                            Text("Restore Files")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.orange)
+                        
+                        Button(action: {
+                            showingPairConfirm = true
+                        }) {
+                            Text("Pair & Adopt")
+                        }
+                        .buttonStyle(.bordered)
+                        .confirmationDialog("Adopt and Pair Backup Drive?", isPresented: $showingPairConfirm) {
+                            Button("Pair with this Mac") {
+                                backupManager.adoptAndPairDiscoveredBackup(discovered)
+                                dismiss()
+                            }
+                            Button("Cancel", role: .cancel) {}
+                        } message: {
+                            Text("This will designate this Mac as the primary source for future backups on this drive.")
+                        }
+                    }
+                }
+                .padding()
+                .frame(maxWidth: .infinity, minHeight: 150)
+                .background(Color.orange.opacity(0.06))
+                .cornerRadius(10)
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.orange.opacity(0.2), lineWidth: 1))
+            }
+            
+            HStack {
+                Spacer()
+                Button("Decide Later") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 620)
     }
 }
