@@ -99,6 +99,12 @@ struct MigrationBannerView: View {
             
             Spacer()
             
+            Button("Auto-Link Folders") {
+                backupManager.autoLinkStandardFolders()
+            }
+            .buttonStyle(.bordered)
+            .help("Match backup folders to standard folders on this Mac (~/Documents, ~/Desktop, etc.)")
+            
             Button("Restore to this Mac") {
                 selectedTab = .restore
             }
@@ -188,11 +194,29 @@ struct SidebarView: View {
                 }
                 
                 if let target = backupManager.targetFolder, backupManager.isDriveConnected {
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 6) {
                         Text(target.path)
                             .font(.caption2)
                             .lineLimit(1)
                             .truncationMode(.middle)
+                        
+                        // Storage Metrics Indicator
+                        if backupManager.storageMetrics.totalDriveCapacity > 0 {
+                            VStack(alignment: .leading, spacing: 3) {
+                                ProgressView(value: Double(backupManager.storageMetrics.usedDriveSpace), total: Double(backupManager.storageMetrics.totalDriveCapacity))
+                                    .tint(.blue)
+                                HStack {
+                                    Text("\(formatBytes(backupManager.storageMetrics.freeDriveSpace)) free")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.secondary)
+                                    Spacer()
+                                    Text("\(formatBytes(backupManager.storageMetrics.totalDriveCapacity))")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            .padding(.vertical, 2)
+                        }
                         
                         HStack {
                             Menu {
@@ -316,6 +340,13 @@ struct SidebarView: View {
         case .disconnected: return "Drive Disconnected"
         }
     }
+    
+    private func formatBytes(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useAll]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
+    }
 }
 
 // MARK: - Backup Detail View
@@ -364,6 +395,47 @@ struct BackupDetailView: View {
                     .padding(.horizontal)
                     .padding(.vertical, 8)
                     .background(Color.red.opacity(0.1))
+                }
+                
+                // Live Backup Progress & Cancel Bar
+                if backupManager.isBackingUp {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Backing up files...")
+                                .font(.subheadline)
+                                .bold()
+                            Spacer()
+                            if !backupManager.transferRateFormatted.isEmpty {
+                                Text(backupManager.transferRateFormatted)
+                                    .font(.caption)
+                                    .bold()
+                                    .foregroundColor(.blue)
+                            }
+                            if !backupManager.estimatedTimeRemainingFormatted.isEmpty {
+                                Text("ETA: \(backupManager.estimatedTimeRemainingFormatted)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            Button("Cancel", role: .destructive) {
+                                backupManager.cancelTransfer()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                        ProgressView(value: backupManager.pendingBackupPercentage, total: 100)
+                        if !backupManager.currentFileName.isEmpty {
+                            Text(backupManager.currentFileName)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+                    .padding(10)
+                    .background(Color.blue.opacity(0.08))
+                    .cornerRadius(8)
+                    .padding(.horizontal)
+                    .padding(.top, 8)
                 }
                 
                 VSplitView {
@@ -450,7 +522,7 @@ struct BackupDetailView: View {
                 Divider().frame(height: 12)
                 
                 VStack(alignment: .trailing, spacing: 0) {
-                    Text("v1.1.0")
+                    Text("v2.0")
                     Text("Made for my Love - DG").italic()
                 }
                 .font(.system(size: 9))
@@ -489,6 +561,8 @@ struct RestoreDetailView: View {
     @State private var showingCustomDestPicker = false
     @State private var showingFullRestoreConfirm = false
     @State private var showingSelectiveRestoreConfirm = false
+    @State private var showingInsufficientSpaceAlert = false
+    @State private var spaceAlertMessage = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -500,8 +574,16 @@ struct RestoreDetailView: View {
             
             // Configuration Box
             VStack(alignment: .leading, spacing: 14) {
-                Text("Restore Destination")
-                    .font(.headline)
+                HStack {
+                    Text("Restore Destination")
+                        .font(.headline)
+                    Spacer()
+                    if backupManager.storageMetrics.macSSDFreeSpace > 0 {
+                        Text("Mac SSD Free: \(formatBytes(backupManager.storageMetrics.macSSDFreeSpace))")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
                 
                 HStack {
                     Image(systemName: "folder")
@@ -533,7 +615,14 @@ struct RestoreDetailView: View {
             // Actions
             HStack(spacing: 16) {
                 Button(action: {
-                    showingFullRestoreConfirm = true
+                    let needed = backupManager.storageMetrics.activeBackupSize
+                    let check = backupManager.canRestore(bytesNeeded: needed)
+                    if !check.allowed && needed > 0 {
+                        spaceAlertMessage = "Restore requires approximately \(check.neededFormatted), but your Mac SSD only has \(check.freeFormatted) available (with 1 GB safety buffer)."
+                        showingInsufficientSpaceAlert = true
+                    } else {
+                        showingFullRestoreConfirm = true
+                    }
                 }) {
                     Label("Restore All to This Mac", systemImage: "arrow.down.doc.fill")
                         .frame(maxWidth: .infinity)
@@ -543,7 +632,15 @@ struct RestoreDetailView: View {
                 .disabled(backupManager.targetNodes.isEmpty || backupManager.isRestoring)
                 
                 Button(action: {
-                    showingSelectiveRestoreConfirm = true
+                    let nodes = backupManager.checkedNodes.compactMap { backupManager.findNode(by: $0) }
+                    let needed = nodes.reduce(0) { $0 + $1.size }
+                    let check = backupManager.canRestore(bytesNeeded: needed)
+                    if !check.allowed && needed > 0 {
+                        spaceAlertMessage = "Restore requires approximately \(check.neededFormatted), but your Mac SSD only has \(check.freeFormatted) available (with 1 GB safety buffer)."
+                        showingInsufficientSpaceAlert = true
+                    } else {
+                        showingSelectiveRestoreConfirm = true
+                    }
                 }) {
                     Label("Restore Checked (\(backupManager.checkedNodes.count))", systemImage: "checkmark.circle")
                         .frame(maxWidth: .infinity)
@@ -557,10 +654,36 @@ struct RestoreDetailView: View {
             // Status and Progress
             if backupManager.isRestoring {
                 VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Restoring Files...")
+                            .font(.subheadline)
+                            .bold()
+                        Spacer()
+                        if !backupManager.transferRateFormatted.isEmpty {
+                            Text(backupManager.transferRateFormatted)
+                                .font(.caption)
+                                .bold()
+                                .foregroundColor(.blue)
+                        }
+                        if !backupManager.estimatedTimeRemainingFormatted.isEmpty {
+                            Text("ETA: \(backupManager.estimatedTimeRemainingFormatted)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Button("Cancel", role: .destructive) {
+                            backupManager.cancelTransfer()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
                     ProgressView(value: backupManager.restoreProgress)
-                    Text(backupManager.restoreStatus)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    if !backupManager.currentFileName.isEmpty {
+                        Text(backupManager.currentFileName)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
                 }
                 .padding()
                 .background(Color.accentColor.opacity(0.08))
@@ -591,6 +714,11 @@ struct RestoreDetailView: View {
             
             Spacer()
         }
+        .alert("Insufficient Disk Space", isPresented: $showingInsufficientSpaceAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(spaceAlertMessage)
+        }
         .confirmationDialog("Start Full Restore?", isPresented: $showingFullRestoreConfirm) {
             Button("Restore All Files") {
                 backupManager.performFullRestore(to: restoreDestination, conflictPolicy: conflictPolicy)
@@ -619,6 +747,13 @@ struct RestoreDetailView: View {
         if panel.runModal() == .OK, let url = panel.url {
             restoreDestination = url
         }
+    }
+    
+    private func formatBytes(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useAll]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
     }
 }
 
@@ -661,6 +796,37 @@ struct OrphanCleanupView: View {
                 }
                 .padding(10)
                 .background(Color.blue.opacity(0.1))
+            }
+            
+            // Reclaimable Space Stats Header
+            if backupManager.storageMetrics.orphanedFilesSize > 0 || backupManager.storageMetrics.archivedVersionsSize > 0 {
+                HStack(spacing: 20) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Reclaimable Orphan Space")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .textCase(.uppercase)
+                        Text("\(backupManager.storageMetrics.reclaimableSpaceFormatted) (\(backupManager.storageMetrics.orphanCount) files)")
+                            .font(.headline)
+                            .foregroundColor(.red)
+                    }
+                    
+                    Divider().frame(height: 24)
+                    
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Version Archives")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .textCase(.uppercase)
+                        Text("\(formatBytes(backupManager.storageMetrics.archivedVersionsSize)) (\(backupManager.storageMetrics.versionCount) archives)")
+                            .font(.headline)
+                            .foregroundColor(.blue)
+                    }
+                    
+                    Spacer()
+                }
+                .padding(.horizontal)
+                .padding(.top, 10)
             }
             
             // Header Controls

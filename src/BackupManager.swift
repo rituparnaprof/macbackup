@@ -71,6 +71,29 @@ public enum ConflictPolicy: String, CaseIterable, Identifiable {
     public var id: String { rawValue }
 }
 
+public struct StorageMetrics {
+    public var totalDriveCapacity: Int64 = 0
+    public var freeDriveSpace: Int64 = 0
+    public var activeBackupSize: Int64 = 0
+    public var orphanedFilesSize: Int64 = 0
+    public var archivedVersionsSize: Int64 = 0
+    public var macSSDFreeSpace: Int64 = 0
+    public var orphanCount: Int = 0
+    public var versionCount: Int = 0
+    public var activeFileCount: Int = 0
+
+    public var usedDriveSpace: Int64 {
+        max(0, totalDriveCapacity - freeDriveSpace)
+    }
+
+    public var reclaimableSpaceFormatted: String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useAll]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: orphanedFilesSize)
+    }
+}
+
 public class BackupManager: ObservableObject {
     @Published public var sourceFolders: [URL] = []
     @Published public var targetFolder: URL?
@@ -93,11 +116,21 @@ public class BackupManager: ObservableObject {
     @Published public var isMigrationMode: Bool = false
     @Published public var orphanSafetyLocked: Bool = false
 
+    // Storage Analytics
+    @Published public var storageMetrics = StorageMetrics()
+
     // Restore State
     @Published public var isRestoring = false
     @Published public var restoreStatus = ""
     @Published public var restoreProgress: Double = 0.0
     @Published public var restoredFilesCount: Int = 0
+
+    // Real-Time Transfer Metrics & Cancellation
+    @Published public var currentFileName: String = ""
+    @Published public var transferRateFormatted: String = ""
+    @Published public var estimatedTimeRemainingFormatted: String = ""
+    @Published public var totalBytesTransferred: Int64 = 0
+    @Published public var totalBytesToTransfer: Int64 = 0
 
     // Stored Preferences
     @AppStorage("registeredDriveUUID") public var registeredDriveUUID: String = ""
@@ -108,6 +141,7 @@ public class BackupManager: ObservableObject {
     private let fileManager = FileManager.default
     private var cancellables = Set<AnyCancellable>()
     private var activityToken: NSObjectProtocol?
+    @Published public var isCancelRequested = false
 
     public init() {
         if savedLastBackupDate > 0 {
@@ -139,6 +173,18 @@ public class BackupManager: ObservableObject {
                 self?.handleDriveUnmount(notification: notification)
             }
             .store(in: &cancellables)
+    }
+
+    // MARK: - Cancellation
+
+    public func cancelTransfer() {
+        isCancelRequested = true
+        if isBackingUp {
+            backupStatus = "Cancelling backup..."
+        }
+        if isRestoring {
+            restoreStatus = "Cancelling restore..."
+        }
     }
 
     // MARK: - Drive Connection & Status
@@ -181,6 +227,7 @@ public class BackupManager: ObservableObject {
         }
         refreshTargetFiles()
         calculateSyncStatus()
+        calculateStorageMetrics()
     }
 
     private func handleDriveMount(notification: Notification) {
@@ -222,6 +269,7 @@ public class BackupManager: ObservableObject {
                 self.currentManifest = nil
                 self.driveState = .disconnected
                 self.isMigrationMode = false
+                self.storageMetrics = StorageMetrics()
             }
         }
     }
@@ -240,6 +288,7 @@ public class BackupManager: ObservableObject {
             savedSourceFolderPaths = panel.urls.map { $0.path }.joined(separator: "|")
             refreshTargetFiles()
             calculateSyncStatus()
+            calculateStorageMetrics()
         }
     }
 
@@ -281,6 +330,7 @@ public class BackupManager: ObservableObject {
             checkDriveConnectionStatus()
             refreshTargetFiles()
             calculateSyncStatus()
+            calculateStorageMetrics()
         }
     }
 
@@ -293,6 +343,7 @@ public class BackupManager: ObservableObject {
         isDriveConnected = false
         driveState = .disconnected
         isMigrationMode = false
+        storageMetrics = StorageMetrics()
         backupStatus = "Drive deregistered from this Mac."
     }
 
@@ -313,7 +364,37 @@ public class BackupManager: ObservableObject {
         isMigrationMode = false
         refreshTargetFiles()
         calculateSyncStatus()
+        calculateStorageMetrics()
         backupStatus = "Drive paired with this Mac successfully!"
+    }
+
+    public func autoLinkStandardFolders() {
+        guard let manifest = currentManifest else { return }
+        let home = fileManager.homeDirectoryForCurrentUser
+        var linkedURLs: [URL] = []
+        
+        for source in manifest.sources {
+            let candidate: URL
+            if let relHome = source.relativeHomePath, !relHome.isEmpty {
+                candidate = home.appendingPathComponent(relHome)
+            } else {
+                candidate = home.appendingPathComponent(source.folderName)
+            }
+            
+            var isDir: ObjCBool = false
+            if fileManager.fileExists(atPath: candidate.path, isDirectory: &isDir), isDir.boolValue {
+                linkedURLs.append(candidate)
+            }
+        }
+        
+        if !linkedURLs.isEmpty {
+            sourceFolders = linkedURLs
+            savedSourceFolderPaths = linkedURLs.map { $0.path }.joined(separator: "|")
+            adoptBackupForThisMac()
+            backupStatus = "Auto-linked \(linkedURLs.count) standard folder(s) on this Mac!"
+        } else {
+            backupStatus = "No matching standard folders found in your home directory."
+        }
     }
 
     public func ejectDrive() {
@@ -328,6 +409,49 @@ public class BackupManager: ObservableObject {
         } catch {
             DispatchQueue.main.async {
                 self.backupStatus = "Eject Failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    // MARK: - Storage Analytics Calculation
+
+    public func calculateStorageMetrics() {
+        guard let target = targetFolder else { return }
+        
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            
+            var metrics = StorageMetrics()
+            
+            // 1. External drive capacity
+            if let volumeValues = try? target.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityKey]) {
+                metrics.totalDriveCapacity = Int64(volumeValues.volumeTotalCapacity ?? 0)
+                metrics.freeDriveSpace = Int64(volumeValues.volumeAvailableCapacity ?? 0)
+            }
+            
+            // 2. Mac SSD free space
+            let homeURL = self.fileManager.homeDirectoryForCurrentUser
+            if let homeValues = try? homeURL.resourceValues(forKeys: [.volumeAvailableCapacityKey]) {
+                metrics.macSSDFreeSpace = Int64(homeValues.volumeAvailableCapacity ?? 0)
+            }
+            
+            // 3. Target file tree breakdown
+            let leaves = self.flattenNodes(self.targetNodes).filter { !$0.isDirectory }
+            for leaf in leaves {
+                if leaf.isOrphaned {
+                    metrics.orphanedFilesSize += leaf.size
+                    metrics.orphanCount += 1
+                } else if leaf.isVersionedArchive {
+                    metrics.archivedVersionsSize += leaf.size
+                    metrics.versionCount += 1
+                } else {
+                    metrics.activeBackupSize += leaf.size
+                    metrics.activeFileCount += 1
+                }
+            }
+            
+            DispatchQueue.main.async {
+                self.storageMetrics = metrics
             }
         }
     }
@@ -363,7 +487,7 @@ public class BackupManager: ObservableObject {
         }
     }
     
-    private func safeCopyAndVerify(source: URL, target: URL) throws {
+    private func safeCopyAndVerify(source: URL, target: URL, onBytesCopied: ((Int64) -> Void)? = nil) throws {
         let tmpTarget = target.appendingPathExtension("tmp")
         
         if fileManager.fileExists(atPath: tmpTarget.path) {
@@ -373,6 +497,15 @@ public class BackupManager: ObservableObject {
         // 1. Copy to tmp
         try performWithRetry {
             try fileManager.copyItem(at: source, to: tmpTarget)
+        }
+        
+        let fileSize = (try? fileManager.attributesOfItem(atPath: tmpTarget.path)[.size] as? Int64) ?? 0
+        onBytesCopied?(fileSize)
+        
+        // Check cancellation
+        if isCancelRequested {
+            try? fileManager.removeItem(at: tmpTarget)
+            throw NSError(domain: "BackupManager", code: 99, userInfo: [NSLocalizedDescriptionKey: "Transfer cancelled by user."])
         }
         
         // 2. Checksum Verification
@@ -394,17 +527,21 @@ public class BackupManager: ObservableObject {
         try fileManager.moveItem(at: tmpTarget, to: target)
     }
 
-    // MARK: - Backup Execution
+    // MARK: - Backup Execution with Metrics & Cancellation
 
     public func performBackup() {
         guard !sourceFolders.isEmpty, let target = targetFolder else { return }
         
         isBackingUp = true
-        backupStatus = "Starting safe backup..."
+        isCancelRequested = false
+        backupStatus = "Scanning files to back up..."
         newFilesAdded = 0
         modifiedFilesUpdated = 0
+        totalBytesTransferred = 0
+        totalBytesToTransfer = 0
+        transferRateFormatted = ""
+        estimatedTimeRemainingFormatted = ""
         
-        // Sleep Prevention
         activityToken = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "Running Backup")
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -418,23 +555,12 @@ public class BackupManager: ObservableObject {
             }
             
             do {
-                // Update manifest source mappings
-                var updatedSources: [SourceMapping] = []
-                let homePath = FileManager.default.homeDirectoryForCurrentUser.path
-                for source in self.sourceFolders {
-                    let relHome = source.path.hasPrefix(homePath) ? String(source.path.dropFirst(homePath.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/")) : nil
-                    updatedSources.append(SourceMapping(folderName: source.lastPathComponent, relativeHomePath: relHome, lastKnownPath: source.path))
-                }
+                // 1. Pre-scan items and compute total bytes to copy
+                var itemsToCopy: [(source: URL, target: URL, isModification: Bool, oldTargetDate: Date?)] = []
+                var bytesToTransfer: Int64 = 0
                 
-                var manifest = self.currentManifest ?? BackupManifest(friendlyName: target.lastPathComponent)
-                manifest.sources = updatedSources
-                manifest.lastBackupMachine = .current()
-                manifest.updatedAt = Date()
-                try? ManifestManager.save(manifest, to: target)
-                DispatchQueue.main.async { self.currentManifest = manifest }
-
                 for source in self.sourceFolders {
-                    let resourceKeys: [URLResourceKey] = [.contentModificationDateKey]
+                    let resourceKeys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey]
                     let enumerator = self.fileManager.enumerator(at: source, includingPropertiesForKeys: resourceKeys, options: [.skipsHiddenFiles])
                     
                     while let fileURL = enumerator?.nextObject() as? URL {
@@ -447,73 +573,115 @@ public class BackupManager: ObservableObject {
                         let relativePath = fileURL.path.replacingOccurrences(of: sourceParentPath, with: "")
                         let targetURL = target.appendingPathComponent(relativePath)
                         
-                        let targetDir = targetURL.deletingLastPathComponent()
-                        if !self.fileManager.fileExists(atPath: targetDir.path) {
-                            try? self.fileManager.createDirectory(at: targetDir, withIntermediateDirectories: true, attributes: nil)
-                        }
+                        let sourceAttr = try? self.fileManager.attributesOfItem(atPath: fileURL.path)
+                        let fileSize = (sourceAttr?[.size] as? Int64) ?? 0
                         
                         if self.fileManager.fileExists(atPath: targetURL.path) {
-                            let sourceAttr = try? self.fileManager.attributesOfItem(atPath: fileURL.path)
                             let targetAttr = try? self.fileManager.attributesOfItem(atPath: targetURL.path)
-                            
                             let sourceDate = sourceAttr?[.modificationDate] as? Date ?? Date()
                             let targetDate = targetAttr?[.modificationDate] as? Date ?? Date.distantPast
                             
                             if sourceDate.timeIntervalSince(targetDate) > 1.0 {
-                                let ext = targetURL.pathExtension
-                                let nameWithoutExt = targetURL.deletingPathExtension().lastPathComponent
-                                
-                                let formatter = DateFormatter()
-                                formatter.dateFormat = "yyyyMMdd_HHmmss"
-                                let timestamp = formatter.string(from: targetDate)
-                                
-                                let oldFileName = "\(nameWithoutExt)_\(timestamp).\(ext)"
-                                let oldTargetURL = targetURL.deletingLastPathComponent().appendingPathComponent(oldFileName)
-                                
-                                if self.fileManager.fileExists(atPath: oldTargetURL.path) {
-                                    try? self.fileManager.removeItem(at: oldTargetURL)
-                                }
-                                try self.performWithRetry {
-                                    try self.fileManager.moveItem(at: targetURL, to: oldTargetURL)
-                                }
-                                
-                                DispatchQueue.main.async {
-                                    self.backupStatus = "Safe updating: \(targetURL.lastPathComponent)..."
-                                    self.modifiedFilesUpdated += 1
-                                }
-                                try self.safeCopyAndVerify(source: fileURL, target: targetURL)
+                                itemsToCopy.append((source: fileURL, target: targetURL, isModification: true, oldTargetDate: targetDate))
+                                bytesToTransfer += fileSize
                             }
                         } else {
-                            DispatchQueue.main.async {
-                                self.backupStatus = "Safe copying: \(targetURL.lastPathComponent)..."
-                                self.newFilesAdded += 1
-                            }
-                            try self.safeCopyAndVerify(source: fileURL, target: targetURL)
+                            itemsToCopy.append((source: fileURL, target: targetURL, isModification: false, oldTargetDate: nil))
+                            bytesToTransfer += fileSize
                         }
                     }
                 }
                 
                 DispatchQueue.main.async {
+                    self.totalBytesToTransfer = bytesToTransfer
+                }
+                
+                let startTime = Date()
+                
+                // 2. Perform safe copies
+                for item in itemsToCopy {
+                    if self.isCancelRequested {
+                        throw NSError(domain: "BackupManager", code: 99, userInfo: [NSLocalizedDescriptionKey: "Backup cancelled by user."])
+                    }
+                    
+                    let targetDir = item.target.deletingLastPathComponent()
+                    if !self.fileManager.fileExists(atPath: targetDir.path) {
+                        try? self.fileManager.createDirectory(at: targetDir, withIntermediateDirectories: true, attributes: nil)
+                    }
+                    
+                    if item.isModification, let targetDate = item.oldTargetDate {
+                        let ext = item.target.pathExtension
+                        let nameWithoutExt = item.target.deletingPathExtension().lastPathComponent
+                        let formatter = DateFormatter()
+                        formatter.dateFormat = "yyyyMMdd_HHmmss"
+                        let timestamp = formatter.string(from: targetDate)
+                        let oldFileName = "\(nameWithoutExt)_\(timestamp).\(ext)"
+                        let oldTargetURL = item.target.deletingLastPathComponent().appendingPathComponent(oldFileName)
+                        
+                        if self.fileManager.fileExists(atPath: oldTargetURL.path) {
+                            try? self.fileManager.removeItem(at: oldTargetURL)
+                        }
+                        try self.performWithRetry {
+                            try self.fileManager.moveItem(at: item.target, to: oldTargetURL)
+                        }
+                        DispatchQueue.main.async { self.modifiedFilesUpdated += 1 }
+                    } else if !item.isModification {
+                        DispatchQueue.main.async { self.newFilesAdded += 1 }
+                    }
+                    
+                    DispatchQueue.main.async {
+                        self.currentFileName = item.target.lastPathComponent
+                        self.backupStatus = "Copying \(item.target.lastPathComponent)..."
+                    }
+                    
+                    try self.safeCopyAndVerify(source: item.source, target: item.target) { bytesCopied in
+                        self.updateTransferMetrics(bytesCopied: bytesCopied, startTime: startTime)
+                    }
+                }
+                
+                // 3. Update manifest
+                var updatedSources: [SourceMapping] = []
+                let homePath = FileManager.default.homeDirectoryForCurrentUser.path
+                for source in self.sourceFolders {
+                    let relHome = source.path.hasPrefix(homePath) ? String(source.path.dropFirst(homePath.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/")) : nil
+                    updatedSources.append(SourceMapping(folderName: source.lastPathComponent, relativeHomePath: relHome, lastKnownPath: source.path))
+                }
+                
+                var manifest = self.currentManifest ?? BackupManifest(friendlyName: target.lastPathComponent)
+                manifest.sources = updatedSources
+                manifest.lastBackupMachine = .current()
+                manifest.updatedAt = Date()
+                try? ManifestManager.save(manifest, to: target)
+                
+                DispatchQueue.main.async {
+                    self.currentManifest = manifest
                     self.backupStatus = "Backup completed flawlessly!"
                     self.lastBackupDate = Date()
                     self.savedLastBackupDate = self.lastBackupDate!.timeIntervalSince1970
                     self.isBackingUp = false
+                    self.currentFileName = ""
+                    self.transferRateFormatted = ""
+                    self.estimatedTimeRemainingFormatted = ""
                     self.refreshTargetFiles()
                     self.calculateSyncStatus()
+                    self.calculateStorageMetrics()
                 }
                 
             } catch {
                 DispatchQueue.main.async {
-                    self.backupStatus = "Error: \(error.localizedDescription)"
+                    self.backupStatus = error.localizedDescription.contains("cancelled") ? "Backup cancelled by user." : "Error: \(error.localizedDescription)"
                     self.isBackingUp = false
+                    self.currentFileName = ""
+                    self.transferRateFormatted = ""
+                    self.estimatedTimeRemainingFormatted = ""
                 }
             }
         }
     }
 
-    // MARK: - Restore Engine (Reverse Staging with SHA-256)
+    // MARK: - Restore Engine with Metrics & Pre-Space Check
 
-    private func safeRestoreAndVerify(source: URL, target: URL, conflictPolicy: ConflictPolicy) throws {
+    private func safeRestoreAndVerify(source: URL, target: URL, conflictPolicy: ConflictPolicy, onBytesRestored: ((Int64) -> Void)? = nil) throws {
         var finalTarget = target
         if fileManager.fileExists(atPath: target.path) {
             switch conflictPolicy {
@@ -550,6 +718,14 @@ public class BackupManager: ObservableObject {
             try fileManager.copyItem(at: source, to: tmpTarget)
         }
 
+        let fileSize = (try? fileManager.attributesOfItem(atPath: tmpTarget.path)[.size] as? Int64) ?? 0
+        onBytesRestored?(fileSize)
+
+        if isCancelRequested {
+            try? fileManager.removeItem(at: tmpTarget)
+            throw NSError(domain: "RestoreEngine", code: 99, userInfo: [NSLocalizedDescriptionKey: "Restore cancelled by user."])
+        }
+
         // 2. Hash check
         guard let sourceHash = hashFile(url: source),
               let targetHash = hashFile(url: tmpTarget) else {
@@ -569,31 +745,63 @@ public class BackupManager: ObservableObject {
         try fileManager.moveItem(at: tmpTarget, to: finalTarget)
     }
 
-    private func restoreNodeRecursively(_ node: FileSystemNode, relativeToBase: URL, destinationBase: URL, conflictPolicy: ConflictPolicy) throws {
+    private func restoreNodeRecursively(_ node: FileSystemNode, relativeToBase: URL, destinationBase: URL, conflictPolicy: ConflictPolicy, startTime: Date) throws {
+        if isCancelRequested {
+            throw NSError(domain: "RestoreEngine", code: 99, userInfo: [NSLocalizedDescriptionKey: "Restore cancelled by user."])
+        }
+        
         if node.isDirectory {
             if let children = node.children {
                 for child in children {
-                    try restoreNodeRecursively(child, relativeToBase: relativeToBase, destinationBase: destinationBase, conflictPolicy: conflictPolicy)
+                    try restoreNodeRecursively(child, relativeToBase: relativeToBase, destinationBase: destinationBase, conflictPolicy: conflictPolicy, startTime: startTime)
                 }
             }
         } else {
             let relativePath = node.url.path.replacingOccurrences(of: relativeToBase.path + "/", with: "")
             let destURL = destinationBase.appendingPathComponent(relativePath)
-            try safeRestoreAndVerify(source: node.url, target: destURL, conflictPolicy: conflictPolicy)
+            
+            DispatchQueue.main.async {
+                self.currentFileName = node.name
+                self.restoreStatus = "Restoring \(node.name)..."
+            }
+            
+            try safeRestoreAndVerify(source: node.url, target: destURL, conflictPolicy: conflictPolicy) { bytesRestored in
+                self.updateTransferMetrics(bytesCopied: bytesRestored, startTime: startTime)
+            }
+            
             DispatchQueue.main.async {
                 self.restoredFilesCount += 1
-                self.restoreStatus = "Restored: \(node.name)"
+                if self.totalBytesToTransfer > 0 {
+                    self.restoreProgress = min(1.0, Double(self.totalBytesTransferred) / Double(self.totalBytesToTransfer))
+                }
             }
         }
+    }
+
+    public func canRestore(bytesNeeded: Int64) -> (allowed: Bool, neededFormatted: String, freeFormatted: String) {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useAll]
+        formatter.countStyle = .file
+        let free = storageMetrics.macSSDFreeSpace
+        let allowed = bytesNeeded <= free
+        return (allowed, formatter.string(fromByteCount: bytesNeeded), formatter.string(fromByteCount: free))
     }
 
     public func performFullRestore(to destinationBaseURL: URL, conflictPolicy: ConflictPolicy = .keepBoth) {
         guard let target = targetFolder else { return }
         
         isRestoring = true
+        isCancelRequested = false
         restoreStatus = "Starting full restore..."
         restoredFilesCount = 0
         restoreProgress = 0.0
+        totalBytesTransferred = 0
+        transferRateFormatted = ""
+        estimatedTimeRemainingFormatted = ""
+        
+        let validNodes = targetNodes.filter { $0.name != ManifestManager.manifestDirectoryName }
+        let totalBytes = flattenNodes(validNodes).filter { !$0.isDirectory }.reduce(0) { $0 + $1.size }
+        totalBytesToTransfer = totalBytes
         
         activityToken = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "Running Restore")
         
@@ -607,21 +815,28 @@ public class BackupManager: ObservableObject {
                 }
             }
             
+            let startTime = Date()
+            
             do {
-                for node in self.targetNodes {
-                    if node.name == ManifestManager.manifestDirectoryName { continue }
-                    try self.restoreNodeRecursively(node, relativeToBase: target, destinationBase: destinationBaseURL, conflictPolicy: conflictPolicy)
+                for node in validNodes {
+                    try self.restoreNodeRecursively(node, relativeToBase: target, destinationBase: destinationBaseURL, conflictPolicy: conflictPolicy, startTime: startTime)
                 }
                 
                 DispatchQueue.main.async {
                     self.restoreStatus = "Restore completed successfully! \(self.restoredFilesCount) files restored."
                     self.isRestoring = false
                     self.restoreProgress = 1.0
+                    self.currentFileName = ""
+                    self.transferRateFormatted = ""
+                    self.estimatedTimeRemainingFormatted = ""
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.restoreStatus = "Restore Failed: \(error.localizedDescription)"
+                    self.restoreStatus = error.localizedDescription.contains("cancelled") ? "Restore cancelled by user." : "Restore Failed: \(error.localizedDescription)"
                     self.isRestoring = false
+                    self.currentFileName = ""
+                    self.transferRateFormatted = ""
+                    self.estimatedTimeRemainingFormatted = ""
                 }
             }
         }
@@ -631,9 +846,16 @@ public class BackupManager: ObservableObject {
         guard let target = targetFolder else { return }
         
         isRestoring = true
+        isCancelRequested = false
         restoreStatus = "Restoring selected items..."
         restoredFilesCount = 0
         restoreProgress = 0.0
+        totalBytesTransferred = 0
+        transferRateFormatted = ""
+        estimatedTimeRemainingFormatted = ""
+        
+        let totalBytes = flattenNodes(nodes).filter { !$0.isDirectory }.reduce(0) { $0 + $1.size }
+        totalBytesToTransfer = totalBytes
         
         activityToken = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled], reason: "Running Selective Restore")
         
@@ -647,16 +869,32 @@ public class BackupManager: ObservableObject {
                 }
             }
             
+            let startTime = Date()
+            
             do {
                 for node in nodes {
                     if node.isDirectory {
-                        try self.restoreNodeRecursively(node, relativeToBase: target, destinationBase: destinationURL, conflictPolicy: conflictPolicy)
+                        try self.restoreNodeRecursively(node, relativeToBase: target, destinationBase: destinationURL, conflictPolicy: conflictPolicy, startTime: startTime)
                     } else {
+                        if self.isCancelRequested {
+                            throw NSError(domain: "RestoreEngine", code: 99, userInfo: [NSLocalizedDescriptionKey: "Restore cancelled by user."])
+                        }
+                        
                         let destFile = destinationURL.appendingPathComponent(node.name)
-                        try self.safeRestoreAndVerify(source: node.url, target: destFile, conflictPolicy: conflictPolicy)
+                        DispatchQueue.main.async {
+                            self.currentFileName = node.name
+                            self.restoreStatus = "Restoring \(node.name)..."
+                        }
+                        
+                        try self.safeRestoreAndVerify(source: node.url, target: destFile, conflictPolicy: conflictPolicy) { bytesRestored in
+                            self.updateTransferMetrics(bytesCopied: bytesRestored, startTime: startTime)
+                        }
+                        
                         DispatchQueue.main.async {
                             self.restoredFilesCount += 1
-                            self.restoreStatus = "Restored: \(node.name)"
+                            if self.totalBytesToTransfer > 0 {
+                                self.restoreProgress = min(1.0, Double(self.totalBytesTransferred) / Double(self.totalBytesToTransfer))
+                            }
                         }
                     }
                 }
@@ -665,13 +903,54 @@ public class BackupManager: ObservableObject {
                     self.restoreStatus = "Selected files restored successfully!"
                     self.isRestoring = false
                     self.restoreProgress = 1.0
+                    self.currentFileName = ""
+                    self.transferRateFormatted = ""
+                    self.estimatedTimeRemainingFormatted = ""
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.restoreStatus = "Restore Failed: \(error.localizedDescription)"
+                    self.restoreStatus = error.localizedDescription.contains("cancelled") ? "Restore cancelled by user." : "Restore Failed: \(error.localizedDescription)"
                     self.isRestoring = false
+                    self.currentFileName = ""
+                    self.transferRateFormatted = ""
+                    self.estimatedTimeRemainingFormatted = ""
                 }
             }
+        }
+    }
+
+    private func updateTransferMetrics(bytesCopied: Int64, startTime: Date) {
+        DispatchQueue.main.async {
+            self.totalBytesTransferred += bytesCopied
+            let elapsed = Date().timeIntervalSince(startTime)
+            if elapsed > 0.5 {
+                let bytesPerSec = Double(self.totalBytesTransferred) / elapsed
+                let formatter = ByteCountFormatter()
+                formatter.allowedUnits = [.useAll]
+                formatter.countStyle = .file
+                self.transferRateFormatted = "\(formatter.string(fromByteCount: Int64(bytesPerSec)))/s"
+                
+                let remainingBytes = max(0, self.totalBytesToTransfer - self.totalBytesTransferred)
+                if bytesPerSec > 0 {
+                    let secondsLeft = Double(remainingBytes) / bytesPerSec
+                    self.estimatedTimeRemainingFormatted = self.formatTimeInterval(secondsLeft)
+                }
+            }
+        }
+    }
+
+    private func formatTimeInterval(_ interval: TimeInterval) -> String {
+        let totalSeconds = Int(interval)
+        if totalSeconds < 60 {
+            return "~\(totalSeconds)s remaining"
+        } else if totalSeconds < 3600 {
+            let minutes = totalSeconds / 60
+            let seconds = totalSeconds % 60
+            return "~\(minutes)m \(seconds)s remaining"
+        } else {
+            let hours = totalSeconds / 3600
+            let minutes = (totalSeconds % 3600) / 60
+            return "~\(hours)h \(minutes)m remaining"
         }
     }
 
@@ -693,6 +972,7 @@ public class BackupManager: ObservableObject {
             DispatchQueue.main.async {
                 self.targetNodes = nodes
                 self.orphanSafetyLocked = isLocked
+                self.calculateStorageMetrics()
             }
         }
     }
@@ -731,7 +1011,6 @@ public class BackupManager: ObservableObject {
                     }
                 }
             } else {
-                // In migration mode or before sources are set, NEVER treat files as orphaned
                 foundInSource = true
             }
             

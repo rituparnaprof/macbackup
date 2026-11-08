@@ -1,7 +1,7 @@
 # MacBackup
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-1.1.0-blue.svg)](https://github.com/rituparnaprof/macbackup/releases)
+[![Version](https://img.shields.io/badge/Version-2.0.0-blue.svg)](https://github.com/rituparnaprof/macbackup/releases)
 [![Platform](https://img.shields.io/badge/Platform-macOS%2013%2B-lightgrey.svg)](https://www.apple.com/macos/)
 [![Architecture](https://img.shields.io/badge/Arch-Apple%20Silicon%20(arm64)-orange.svg)](https://www.apple.com/mac/)
 [![Build & Release](https://github.com/rituparnaprof/macbackup/actions/workflows/build.yml/badge.svg)](https://github.com/rituparnaprof/macbackup/actions/workflows/build.yml)
@@ -12,9 +12,11 @@
 
 ## What it does
 
-- **Detects your drive automatically & supports migration**: Plug in your registered external drive, and the app recognizes it and prompts you to sync right away. If connecting a backup from another MacBook, it automatically switches to Migration Mode, freezes false-orphan markings, and offers a 1-click restore or pairing.
+- **Detects your drive automatically & supports migration**: Plug in your registered external drive, and the app recognizes it and prompts you to sync right away. If connecting a backup from another MacBook, it automatically switches to Migration Mode, freezes false-orphan markings, and offers 1-click folder auto-linking, restore, or machine pairing.
 - **Backs up only what changed**: Only new and modified files are copied over. If an existing backup file has changed on your Mac, the older version is saved with a timestamp instead of being overwritten.
-- **Complete data restoration**: Full machine recovery or selective file/folder restore with configurable collision policies (Keep Both, Overwrite, Skip If Exists) directly to your Mac.
+- **Storage & Reclaimable Space Analytics**: Visual capacity breakdown showing total drive size, free space, active backup footprint, version archives, and reclaimable space consumed by orphaned files.
+- **Live Transfer Speed, Rolling ETA & Cancellation**: Monitor real-time throughput (MB/s) and estimated time remaining during transfers, with instant graceful cancellation and immediate cleanup of temporary `.tmp` files.
+- **Complete data restoration with Pre-Flight Space Guard**: Full machine recovery or selective file/folder restore with configurable collision policies (Keep Both, Overwrite, Skip If Exists) directly to your Mac, guarded by an automated Mac SSD free space check.
 - **Verifies data integrity both ways**: Every file transferred during backup or restore is staged to a temporary file and verified against the source using SHA-256 checksums before atomic move.
 - **Keeps your Mac awake**: Prevents macOS from sleeping during active transfers, and automatically retries any transient read or write errors up to three times.
 - **Dedicated orphan and archive management**: Scans for files removed from your Mac SSD in a dedicated view, allowing you to recover them back to your Mac or safely delete them with automatic safeguards against accidental bulk deletion.
