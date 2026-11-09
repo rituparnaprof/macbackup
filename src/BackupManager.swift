@@ -907,7 +907,7 @@ public class BackupManager: ObservableObject {
                 try? ManifestManager.save(manifest, to: target)
                 
                 let newCatalog = BackupCatalog(
-                    version: "2.5.0",
+                    version: "2.6.0",
                     updatedAt: Date(),
                     activeFiles: activeRelativePaths,
                     archivedVersions: archivedRelativePaths
@@ -1668,7 +1668,7 @@ public class BackupManager: ObservableObject {
             }
         }
         
-        let catalog = BackupCatalog(version: "2.5.0", updatedAt: Date(), activeFiles: activePaths, archivedVersions: archivePaths)
+        let catalog = BackupCatalog(version: "2.6.0", updatedAt: Date(), activeFiles: activePaths, archivedVersions: archivePaths)
         try? CatalogManager.save(catalog, to: target)
         self.currentCatalog = catalog
     }

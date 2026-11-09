@@ -121,7 +121,7 @@ final class MacBackupTests: XCTestCase {
 
     func testManifestSaveAndLoad() throws {
         let manifest = BackupManifest(
-            version: "2.5.0",
+            version: "2.6.0",
             friendlyName: "Samsung T7",
             sources: [
                 SourceMapping(folderName: "Documents", relativeHomePath: "Documents", lastKnownPath: "/Users/test/Documents")
@@ -132,7 +132,7 @@ final class MacBackupTests: XCTestCase {
         let loaded = ManifestManager.load(from: tempDirectory)
 
         XCTAssertNotNil(loaded)
-        XCTAssertEqual(loaded?.version, "2.5.0")
+        XCTAssertEqual(loaded?.version, "2.6.0")
         XCTAssertEqual(loaded?.friendlyName, "Samsung T7")
         XCTAssertEqual(loaded?.sources.count, 1)
         XCTAssertEqual(loaded?.sources.first?.folderName, "Documents")
@@ -143,7 +143,7 @@ final class MacBackupTests: XCTestCase {
         // Manifest created with a different machine ID
         let foreignMachine = MachineMetadata(machineId: "FOREIGN_MACHINE_UUID", hostname: "MacBookPro-Other", username: "alex")
         let manifest = BackupManifest(
-            version: "2.5.0",
+            version: "2.6.0",
             friendlyName: "External Drive",
             lastBackupMachine: foreignMachine
         )
@@ -377,7 +377,7 @@ final class MacBackupTests: XCTestCase {
 
     func testCatalogSaveAndLoad() throws {
         let catalog = BackupCatalog(
-            version: "2.5.0",
+            version: "2.6.0",
             activeFiles: ["Documents/active.txt", "Desktop/notes.txt"],
             archivedVersions: ["Documents/active_20261108_120000.txt"]
         )
@@ -386,7 +386,7 @@ final class MacBackupTests: XCTestCase {
         let loaded = CatalogManager.load(from: tempDirectory)
 
         XCTAssertNotNil(loaded)
-        XCTAssertEqual(loaded?.version, "2.5.0")
+        XCTAssertEqual(loaded?.version, "2.6.0")
         XCTAssertEqual(loaded?.activeFiles.count, 2)
         XCTAssertTrue(loaded?.activeFiles.contains("Documents/active.txt") == true)
         XCTAssertTrue(loaded?.archivedVersions.contains("Documents/active_20261108_120000.txt") == true)
@@ -407,7 +407,7 @@ final class MacBackupTests: XCTestCase {
 
         // Save catalog identifying report.pdf as active and report_20261108_120000.pdf as archive
         let catalog = BackupCatalog(
-            version: "2.5.0",
+            version: "2.6.0",
             activeFiles: ["Documents/report.pdf"],
             archivedVersions: ["Documents/report_20261108_120000.pdf"]
         )
